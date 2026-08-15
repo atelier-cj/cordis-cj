@@ -12,7 +12,7 @@
   link-option = ""
   include = ["src"]
   license = ["MIT"]
-  repository = ["https://atomgit.com/ystyle/cordis-cj.git"]
+  repository = "https://atomgit.com/ystyle/cordis-cj.git"
   authors = ["ystyle"]
 
 [package.package-configuration."ystyle::cordis_plugin.examples.e2e"]
