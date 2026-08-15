@@ -1,7 +1,7 @@
 [workspace]
-  members = ["cordis_core", "cordis_host", "cordis_tests"]
-  build-members = ["cordis_core", "cordis_host", "cordis_tests"]
-  test-members = ["cordis_core", "cordis_host", "cordis_tests"]
+  members = ["cordis_core", "cordis_host", "cordis_plugin", "cordis_tests"]
+  build-members = ["cordis_core", "cordis_host", "cordis_plugin", "cordis_tests"]
+  test-members = ["cordis_core", "cordis_host", "cordis_plugin", "cordis_tests"]
   compile-option = ""
   override-compile-option = ""
   link-option = ""

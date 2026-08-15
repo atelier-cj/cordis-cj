@@ -25,7 +25,7 @@
   - 同一结构 TOML/JSON 双格式读写，无格式耦合。
 - **测试**：`cordis_tests` 22 用例全通过（协议往返 16 + 配置 6）。
 
-### P1 — cordis_host（提交中，分支 `feat/cordis-host`）
+### P1 — cordis_host（提交 `c4a1e1e`，分支 `feat/cordis-host`）
 
 - **`cordis_core/src/status.cj`**：`InstanceStatus` 枚举（Starting/Active/Unloading/Failed/Unreachable），`@Derive[Equatable]`。
 - **`cordis_host/src/pipe_transport.cj`**：`PipeTransport` 实现 jsonrpc `Transport` 接口——`send` 写子进程 stdin、`receive` 读子进程 stdout（EOF 返回 None，JsonRpcClient 自动停止 = 崩溃检测信号源）、`close` 置标志（OutputStream 无 close()，EOF 通知由 terminate 强杀完成）。
@@ -33,11 +33,20 @@
 - **`cordis_host/src/plugin_manager.cj`**：`PluginManager`——`launch`（三流 Pipe + 建连 + stderr 转发线程）、`terminate`（关连接 + 强杀 + wait 回收防僵尸）、`isExited`（client.isClosed 探测崩溃）、`forwardStderr`（StringReader 逐行转发）。
 - **测试**：新增 PipeTransport 5 用例（cat 回显/close/EOF/大消息 5000 字节）+ PluginManager 3 用例（生命周期/stderr 转发/进程退出探测），共 30 用例全通过（含真实子进程）。
 
+### P2 — cordis_plugin（提交中，分支 `feat/cordis-plugin`）
+
+- **`cordis_plugin/src/service_registry.cj`**：`ServiceRegistry`——服务注册/撤销（undo_id → disposer）+ 可逆效果列表（effect，卸载逆序执行）+ 服务处理器注册与 invoke 分发（`invokeHandler(service, method, args)`）。
+- **`cordis_plugin/src/plugin_runtime.cj`**：`PluginContext`（provide/dispose/registerHandler/effect/invoke/log）+ `PluginRuntime.run(pluginId, inject, provide, handler)`——握手（initialize 请求）→ 注册服务（provide 请求拿 undo_id）→ 业务 handler → 阻塞等连接关闭 → 逆序 disposeAll。宿主 → 插件处理器：initialized/dispose/notify/ping/invoke。
+- **测试基础设施**：`MemoryDuplexTransport`（内存双工管道，两端点共享单向管道）——无需真实子进程即可对接宿主 JsonRpcClient 与插件 JsonRpcServer。
+- **测试**：`FakeHost`（模拟宿主）验证完整流程：握手 + 双服务 provide、invoke 转发（calc.add = 2+3 → 5）、dispose 撤销、ping 探活。共 34 用例全通过。
+- **关键**：插件侧用 `JsonRpcServer.start()`（后台 receiveLoop）+ `request()`（主动请求宿主），不能 start()+serve() 双 receiveLoop；阻塞等待用轮询 `server.isClosed()`。
+
 ## 关键决策记录
 
 1. **配置格式**：采用 tomlcj + `Serializable<T>` 统一接口，TOML/JSON 皆可（atelier 同款模式），不绑定具体格式。
 2. **宏后置 P4**：运行时库先行；宏可行性已由工作区项目实证（kux-cj @Crud 生成完整服务类、CJson @JsonSerializable 生成序列化代码、defer-cj 重写函数体、embed-cj 宏内执行宿主代码）。
 3. **序列化规范**：固定结构类实现 json.stream 接口；jsonvalue 仅用于无固定结构的动态字段（config/args）。
+4. **jsonrpc 依赖**：中心仓 jsonrpc 0.4.2 无配套 jsonrpc_stdio（0.4.1 未发布）→ 全部改用本地 path 依赖 `../../json-rpc/jsonrpc`（版本一致、stdio 可用）。
 
 ## 工程要点（踩坑记录）
 
@@ -53,8 +62,13 @@
 - `InstanceStatus` 枚举比较需要 `@Derive[Equatable]`（默认无 `==`）。
 - 测试真实子进程：cat 不退出时 `readToEnd` 会永久阻塞 → 循环 receive 计数收满 + `terminate(force: true)` + `wait()` 防僵尸。
 - 测试挂起时用 `timeout 120 cjpm test` 包裹防死锁。
+- 仓颉测试类内不能嵌套 class → 辅助类（FakeHost）放 @Test 类外顶层；测试辅助文件若无 @Test 宏会报 main 缺失 → 辅助类并入有 @Test 的测试文件。
+- 无参 lambda 语法是 `{ => expr }`，不是 `{ () => expr }`。
+- `JsonValue` 的 `[](key)` 返回 `?JsonValue`（Option），match 需 `case Some(JsonValue.String(k))`。
+- `JsonRpcClient.call("method")` 无参重载是非泛型的，不能带 `<T, R>` 类型参数。
+- 插件侧不能 `start()` + `serve()` 并用（双 receiveLoop 竞争读 transport）→ `start()` 后台接收 + 轮询 `isClosed()` 阻塞主线程。
 
 ## 待办 / 下一步
 
-- [ ] P2：cordis_plugin SDK（PluginRuntime + ServiceRegistry + invoke 转发）
-- [ ] P3：Reconciler + 端到端
+- [ ] P3：Reconciler（TOML diff + 拓扑排序 + 先加后删 + 崩溃自愈）+ 端到端（宿主拉起真实插件进程）
+- [ ] P4：宏层 @plugin/@inject/@provide
