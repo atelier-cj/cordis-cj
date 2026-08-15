@@ -53,6 +53,20 @@ public class PluginContext {
     }
 
     /**
+     * 注册服务实现（泛型版）：宿主 invoke 转发到本插件时调用
+     *
+     * 参数自动反序列化（T <: JsonDeserializable<T>），返回值自动序列化
+     * （R <: JsonSerializable），服务端 handler 直接操作仓颉类型。
+     *
+     * @param key 服务 Key（与 provide 的 Key 对应）
+     * @param handler (method, args: Array<T>) -> R
+     */
+    public func registerHandler<T, R>(key: String, handler: (String, Array<T>) -> R): Unit
+        where T <: JsonDeserializable<T>, R <: JsonSerializable {
+        this.runtime.registry.registerHandler<T, R>(key, handler)
+    }
+
+    /**
      * 注册可逆效果：返回 disposer，插件卸载时逆序执行（对应 Cordis ctx.effect）
      */
     public func effect(disposer: () -> Unit): Unit {
