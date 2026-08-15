@@ -79,7 +79,7 @@
 - **宿主 EventRegistry（P6.2，提交 `c129de3`）**：`event_registry.cj`——订阅/退订/按插件清理/subscriberCount/dispatch（同步按注册顺序，派发失败自动清理崩溃订阅者）；`plugin_host.cj` 接入 subscribe/unsubscribe/emit 处理器 + removePlugin 清理订阅。4 用例。
 - **插件侧 API（P6.3，提交 `3545ebf`）**：`PluginContext.on(event, listener)`（effect 自动退订）/ `emit(event, args)`；PluginRuntime 注册 `events/dispatch` 本地处理器（按事件名分发监听器）。2 用例。
 - **端到端（P6.4，提交 `afe6d17`）**：`examples/event_sub` + `examples/event_emit` 真实插件；`EndToEndTest.testEventBusEndToEnd`——订阅者先注册 → 发布者 emit 2 事件 → 宿主路由 → 订阅者收到并 log → 卸载后订阅清理。**共 61 用例全通过**。
-- **关键修复**：PluginHost 的 `setNotificationCallback` 只能设一个回调——log 与 events/emit 必须合并处理，独立回调会覆盖导致 log 丢失。
+- **关键修复（演进）**：早期 `setNotificationCallback` 是单回调覆盖语义，log 与 events/emit 需合并处理（独立回调会覆盖）。已给 json-rpc 的 `JsonRpcClient` 增加多回调支持（`setNotificationCallback(cb)` 单覆盖 / `setNotificationCallback(cbs)` 多覆盖 / `addNotificationCallback(cb)` 追加，提交 `5848937`）——cordis 改用 `addNotificationCallback` 独立注册 log 与 events/emit，消除合并脆弱性（提交 `cbb79d2`）。
 - **事件参数**：`Array<JsonValue>`（动态结构，jsonvalue 合法使用）；v2 增强：waterfall/parallel/serial 派发模式、`on<T>` 类型安全重载（见 design-events.md §11 范围外）。
 
 ### 收尾（提交 `c9ce254` / `647c1ca` / `584c2d2` / `1e78121` / `89f1e74`）
