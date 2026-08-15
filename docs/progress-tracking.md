@@ -96,7 +96,7 @@
   - TokenKind 无 LBRACKET/RBRACKET，方括号是 `LSQUARE`/`RSQUARE`。
   - 属性宏调用必须带 `[]` 且大小写匹配定义：`@Plugin[]`（不是 `@plugin`）。
   - 宏展开代码引用运行时符号：宏包 `public import ystyle::cordis_plugin.PluginRuntime`，展开代码用短名（不能用 `ystyle::cordis_plugin.PluginRuntime` 限定路径，宏展开上下文解析失败）。
-  - 宏调用方与宏包同模块（CJson 模式）可行；跨模块带 organization 的宏依赖传递有缺陷（实证：去掉 organization 后可跨模块，但保持同模块架构）。
+  - 宏调用方与宏包同模块（CJson 模式）可行；**跨模块带 organization 的宏依赖传递有 cjpm 缺陷**（详见 [macro-org-dependency-issue.md](./macro-org-dependency-issue.md)：同模块带 org 可用、跨模块失败、去掉 org 跨模块立即可用）。
   - `getChildMessages("Provide")` 收集子宏消息：子宏 `assertParentContext("Plugin")` + `setItem("serviceKey"/"methodName")`。
   - quote 插值：`$(String)` 生成带引号字符串字面量；标识符用 `Token(TokenKind.IDENTIFIER, name)`；`$(ArrayList<Tokens>)` 有限制 → 用 `Tokens + Token(TokenKind.NL)` 手动拼接。
 
