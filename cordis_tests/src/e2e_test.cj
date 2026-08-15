@@ -182,4 +182,58 @@ class EndToEndTest {
         // 清理
         host.removePlugin("e2e-plugin")
     }
+
+    @TestCase
+    func testMacroPluginLifecycle(): Unit {
+        // 宏插件（@Plugin + @Provide 生成）端到端：握手/服务注册/invoke
+        let macroBinary = "./target/release/bin/ystyle::cordis_plugin.examples.macro_demo"
+        @Expect(exists(Path(macroBinary)))
+        let manager = PluginManager()
+        let host = PluginHost(manager)
+        let entry = PluginEntry("macro-plugin", macroBinary,
+            provide: ArrayList<String>.of(["echo", "add"]))
+
+        let instance = host.launchPlugin(entry)
+        // 等待 Active + 服务注册
+        var ready = false
+        for (i in 0..200) {
+            if (host.state.hasService("echo") && host.state.hasService("add")) {
+                ready = true
+                break
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(ready)
+
+        // invoke add(2,3) → 5（宏生成的方法路由）
+        let addResult = instance.client.call<JsonValue, JsonValue>("invoke",
+            params: Some(JsonValue.fromObject(InvokeParams("add", "add",
+                [JsonValue.Number(2.0), JsonValue.Number(3.0)]))))
+        match (addResult) {
+            case Ok(v) =>
+                match (v) {
+                    case JsonValue.Number(n) => @Expect(n, 5.0)
+                    case _ => @Fail("expected number result")
+                }
+            case Err(e) => @Fail("macro invoke failed: ${e}")
+        }
+
+        // invoke echo("hello-macro") → "hello-macro"
+        let echoResult = instance.client.call<JsonValue, JsonValue>("invoke",
+            params: Some(JsonValue.fromObject(InvokeParams("echo", "echo",
+                [JsonValue.String("hello-macro")]))))
+        match (echoResult) {
+            case Ok(v) =>
+                match (v) {
+                    case JsonValue.String(s) => @Expect(s, "hello-macro")
+                    case _ => @Fail("expected string result")
+                }
+            case Err(e) => @Fail("macro echo failed: ${e}")
+        }
+
+        // 热卸载清理
+        host.removePlugin("macro-plugin")
+        @Expect(!host.state.hasService("echo"))
+        @Expect(!host.state.hasService("add"))
+    }
 }

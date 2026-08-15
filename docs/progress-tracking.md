@@ -41,13 +41,23 @@
 - **测试**：`FakeHost`（模拟宿主）验证完整流程：握手 + 双服务 provide、invoke 转发（calc.add = 2+3 → 5）、dispose 撤销、ping 探活。共 34 用例全通过。
 - **关键**：插件侧用 `JsonRpcServer.start()`（后台 receiveLoop）+ `request()`（主动请求宿主），不能 start()+serve() 双 receiveLoop；阻塞等待用轮询 `server.isClosed()`。
 
-### P3 — Reconciler + 端到端（提交中，分支 `feat/cordis-reconciler`）
+### P3 — Reconciler + 端到端（提交 `776aeef`，分支 `feat/cordis-reconciler`）
 
 - **`cordis_host/src/host_state.cj`**：`HostState`——desired/actual/serviceIndex/undoMap，服务注册/撤销/按提供者清理。
 - **`cordis_host/src/plugin_host.cj`**：`PluginHost`——宿主侧 RPC 处理器（initialize 依赖检查 + provide 分配 undo_id + log 收集）、`launchPlugin`、`reconcile`（读 TOML → diff → 拓扑排序 → 先加后删 → 崩溃自愈 `healCrashed`）、`removePlugin`（终止 + 清理服务注册表）。
 - **`cordis_plugin/src/line_stdio_transport.cj`**：`LineStdioTransport`——插件侧换行帧传输（readln 逐行 + 补回 \n）。
 - **`cordis_plugin/src/examples/e2e/main.cj`**：端到端测试插件（echo/add 两服务），静态编译为独立可执行。
 - **测试**：`EndToEndTest` 3 用例（真实宿主 + 真实插件进程）：完整生命周期（握手→服务注册→invoke 2+3=5→echo→热卸载清理）、配置调谐（TOML 拉起插件）、崩溃自愈（强杀后自动重启）。**共 37 用例全通过**。
+
+### P4 — 宏层 @Plugin/@Provide（提交中，分支 `feat/cordis-macros`）
+
+- **`cordis_plugin/src/macros/plugin_macros.cj`**：`macro package ystyle::cordis_plugin.macros`
+  - `@Plugin[]`（属性宏）：解析类声明 → 收集子宏 @Provide 消息（`getChildMessages("Provide")`）→ 生成 `main` + `PluginRuntime.run(类名, [], [keys], { ctx => let __plugin = 类名(); ctx.registerHandler(...) })` → 原类保持不变
+  - `@Provide["key"]`（属性宏）：`assertParentContext("Plugin")` + `setItem("serviceKey"/"methodName")` 上报 → 保持原方法不变
+  - 宏包 `public import ystyle::cordis_plugin.PluginRuntime` 重导出运行时符号（defer-cj/embed-cj 模式）
+- **`cordis_plugin/src/examples/macro_demo/main.cj`**：宏插件示例（@Plugin + 2×@Provide：echo/add），静态编译
+- **测试**：`EndToEndTest.testMacroPluginLifecycle`——真实宿主拉起宏插件：握手 → 双服务注册 → invoke add(2,3)=5 → echo("hello-macro") → 热卸载。**共 38 用例全通过**。
+- **关键**：宏调用大小写敏感（定义 `Plugin` 调用 `@Plugin[]`）；属性宏需 `[]`（`@Plugin[]` 空属性合法）；`@Inject`（字段→prop getter）记为后续增强。
 
 ## 关键决策记录
 
@@ -56,6 +66,7 @@
 3. **序列化规范**：固定结构类实现 json.stream 接口；jsonvalue 仅用于无固定结构的动态字段（config/args）。
 4. **jsonrpc 依赖**：中心仓 jsonrpc 0.4.2 无配套 jsonrpc_stdio（0.4.1 未发布）→ 全部改用本地 path 依赖 `../../json-rpc/jsonrpc`（版本一致、stdio 可用）。
 5. **帧协议改为换行帧（重要修正）**：仓颉 `ConsoleReader.read(Array<Byte>)` 在管道 stdin（子进程被 launch 拉起的场景）下永久阻塞，无法用于 Content-Length 帧；`readln()` 可靠。→ 插件侧 `LineStdioTransport`（readln 逐行 + 补回 `\n`）+ `NewlineFraming`，宿主侧 PipeTransport 同步 `NewlineFraming`（与 mcp-cj 生产方案一致）。设计文档 §4 的 Content-Length 帧在此环境不可行，已修正。
+6. **宏架构（P4）**：宏包与插件 SDK 同模块（CJson 模式）；宏展开代码引用运行时符号需宏包 `public import` 重导出；`@Plugin`/`@Provide` 是属性宏（双 Tokens 参数），调用须带 `[]`（`@Plugin[]` 空属性合法）且大小写匹配定义。
 
 ## 工程要点（踩坑记录）
 
@@ -80,8 +91,17 @@
 - **双重去换行**：readln 已去掉行尾 `\n`，若再让 NewlineFraming 找 `\n` 永远解析不了 → LineStdioTransport.receive() 必须补回 `\n`。
 - 测试类 `@Expect(exists(Path(...)))` 等路径断言；`File` 无 delete()，用 `std.fs.remove(Path(p))`。
 - cjpm package-configuration 键：`"cordis_plugin.examples.e2e"`（无 organization 前缀），examples 目录需父包声明文件（examples.cj），子包目录名 = 包尾名（e2e 而非 e2e_plugin）。
+- **宏踩坑（P4）**：
+  - `macro` 是仓颉关键字，不能做包名（`examples.macro` 非法）→ 用 `macro_demo` 等。
+  - TokenKind 无 LBRACKET/RBRACKET，方括号是 `LSQUARE`/`RSQUARE`。
+  - 属性宏调用必须带 `[]` 且大小写匹配定义：`@Plugin[]`（不是 `@plugin`）。
+  - 宏展开代码引用运行时符号：宏包 `public import ystyle::cordis_plugin.PluginRuntime`，展开代码用短名（不能用 `ystyle::cordis_plugin.PluginRuntime` 限定路径，宏展开上下文解析失败）。
+  - 宏调用方与宏包同模块（CJson 模式）可行；跨模块带 organization 的宏依赖传递有缺陷（实证：去掉 organization 后可跨模块，但保持同模块架构）。
+  - `getChildMessages("Provide")` 收集子宏消息：子宏 `assertParentContext("Plugin")` + `setItem("serviceKey"/"methodName")`。
+  - quote 插值：`$(String)` 生成带引号字符串字面量；标识符用 `Token(TokenKind.IDENTIFIER, name)`；`$(ArrayList<Tokens>)` 有限制 → 用 `Tokens + Token(TokenKind.NL)` 手动拼接。
 
 ## 待办 / 下一步
 
-- [ ] P4：宏层 @plugin/@inject/@provide（参考 kux-cj @Crud、CJson @JsonSerializable）
+- [ ] @Inject 宏（字段 → 代理 getter，经宿主 invoke 转发）——P4 已交付 @Plugin/@Provide 核心，@Inject 后续补
 - [ ] 后续增强：initialize 依赖不满足时插件保持 Waiting 重试（当前直接拒绝）；事件总线（emit/waterfall）；配置热更新监听
+- [ ] 框架收尾：README、示例完善、发布流程（cangjie-publish）
