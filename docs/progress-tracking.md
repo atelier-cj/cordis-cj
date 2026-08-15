@@ -57,6 +57,13 @@
   - 宏包 `public import ystyle::cordis_plugin.PluginRuntime` 重导出运行时符号（defer-cj/embed-cj 模式）
 - **`cordis_plugin/src/examples/macro_demo/main.cj`**：宏插件示例（@Plugin + 2×@Provide：echo/add），静态编译
 - **测试**：`EndToEndTest.testMacroPluginLifecycle`——真实宿主拉起宏插件：握手 → 双服务注册 → invoke add(2,3)=5 → echo("hello-macro") → 热卸载。**共 38 用例全通过**。
+
+### P4.1 — 外部插件示例（独立模块，不使用宏）
+
+- **`cordis_examples/`**：独立模块插件示例（`PluginRuntime.run` 显式 API），模拟外部插件作者项目。
+- **验证**：带 org 的普通库（cordis_plugin）被独立模块跨模块依赖**完全正常**（cjpm 缺陷只影响宏包，不影响普通库）；插件握手/服务注册/invoke(7+8=15)/热卸载全通。
+- **测试**：`EndToEndTest.testExternalPluginLifecycle`——真实宿主拉起独立模块插件。**共 39 用例全通过**。
+- **意义**：宏缺陷的规避方案 B 落地——外部插件作者用显式 API 写法即可，无需等待 cjpm 修复。
 - **关键**：宏调用大小写敏感（定义 `Plugin` 调用 `@Plugin[]`）；属性宏需 `[]`（`@Plugin[]` 空属性合法）；`@Inject`（字段→prop getter）记为后续增强。
 
 ## 关键决策记录

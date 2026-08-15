@@ -236,4 +236,46 @@ class EndToEndTest {
         @Expect(!host.state.hasService("echo"))
         @Expect(!host.state.hasService("add"))
     }
+
+    @TestCase
+    func testExternalPluginLifecycle(): Unit {
+        // 独立模块插件（不依赖宏，PluginRuntime.run 显式 API）：
+        // 验证外部插件作者在「cjpm 带 org 宏包跨模块缺陷」下仍可开发插件
+        let externalBinary = "./target/release/bin/ystyle::cordis_examples"
+        @Expect(exists(Path(externalBinary)))
+        let manager = PluginManager()
+        let host = PluginHost(manager)
+        let entry = PluginEntry("external-plugin", externalBinary,
+            provide: ArrayList<String>.of(["echo", "add"]))
+
+        let instance = host.launchPlugin(entry)
+        // 等待 Active + 服务注册
+        var ready = false
+        for (i in 0..200) {
+            if (host.state.hasService("echo") && host.state.hasService("add")) {
+                ready = true
+                break
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(ready)
+
+        // invoke add(7,8) → 15
+        let addResult = instance.client.call<JsonValue, JsonValue>("invoke",
+            params: Some(JsonValue.fromObject(InvokeParams("add", "add",
+                [JsonValue.Number(7.0), JsonValue.Number(8.0)]))))
+        match (addResult) {
+            case Ok(v) =>
+                match (v) {
+                    case JsonValue.Number(n) => @Expect(n, 15.0)
+                    case _ => @Fail("expected number result")
+                }
+            case Err(e) => @Fail("external invoke failed: ${e}")
+        }
+
+        // 热卸载清理
+        host.removePlugin("external-plugin")
+        @Expect(!host.state.hasService("echo"))
+        @Expect(!host.state.hasService("add"))
+    }
 }

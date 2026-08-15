@@ -132,10 +132,14 @@ let result = instance.client.call<JsonValue, JsonValue>("invoke",
 // result == Ok(JsonValue.Number(5.0))
 ```
 
-## 不使用宏的插件写法（运行时库显式 API）
+## 不使用宏的插件写法（外部插件作者的标准方案）
+
+**这是推荐给外部插件作者的写法**：手写 `main` + `PluginRuntime.run` 显式注册服务，不依赖宏，因此不受「cjpm 带 organization 宏包跨模块依赖缺陷」影响（详见 [docs/macro-org-dependency-issue.md](docs/macro-org-dependency-issue.md)）。完整示例见 [`cordis_examples/`](cordis_examples/)。
 
 ```cangjie
+// my_plugin/src/main.cj（独立模块）
 import ystyle::cordis_plugin.*
+import jsonvalue.*
 
 main(): Int64 {
     PluginRuntime.run("my-plugin", [], ["echo"], { ctx =>
@@ -148,7 +152,20 @@ main(): Int64 {
 }
 ```
 
+```toml
+[package]
+  name = "my_plugin"
+  output-type = "executable"
+  compile-option = "--static"
+
+[dependencies]
+  "ystyle::cordis_plugin" = { path = "../cordis_plugin" }   # 带 org 的普通库跨模块依赖正常
+  "jsonvalue" = "1.1.0"
+```
+
 `PluginContext` 提供：`provide` / `dispose` / `registerHandler` / `effect`（可逆效果）/ `invoke` / `log`。
+
+> 两种写法对照：**宏写法**（`@Plugin[]`/`@Provide[]`）适合宏包与插件同模块的场景（如框架内置插件）；**显式 API 写法**适合独立模块的外部插件（不受宏缺陷影响）。两者最终行为一致。
 
 ## 协议
 
@@ -175,7 +192,7 @@ eval "$(cjvs env zsh)" && eval "$(cjvs stdx-env zsh)"
 cjpm test -j 16 --no-progress
 ```
 
-38 个用例，覆盖：协议序列化往返、配置解析、管道传输（真实子进程）、进程管理、插件运行时（内存双端对接）、端到端（真实宿主 ↔ 真实插件进程：握手/服务注册/invoke/热卸载/崩溃自愈）、宏插件生命周期。
+39 个用例，覆盖：协议序列化往返、配置解析、管道传输（真实子进程）、进程管理、插件运行时（内存双端对接）、端到端（真实宿主 ↔ 真实插件进程：握手/服务注册/invoke/热卸载/崩溃自愈）、宏插件生命周期、独立模块外部插件生命周期。
 
 ## 文档
 
