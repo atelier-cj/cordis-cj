@@ -5,6 +5,7 @@ import ystyle::cordis_core.*
 import ystyle::jsonrpc.*
 import jsonvalue.*
 import std.collection.{HashMap, ArrayList}
+import std.sync.Mutex
 import std.fs.{Path, exists, File, OpenMode, remove}
 import std.unittest.*
 import std.unittest.testmacro.*
@@ -277,5 +278,75 @@ class EndToEndTest {
         host.removePlugin("external-plugin")
         @Expect(!host.state.hasService("echo"))
         @Expect(!host.state.hasService("add"))
+    }
+
+    @TestCase
+    func testEventBusEndToEnd(): Unit {
+        // 事件总线端到端：真实宿主 + 真实双插件进程
+        // 订阅者（event-sub）先启动并订阅 stats/report；
+        // 发布者（event-emit）后启动，emit 经宿主路由到订阅者，
+        // 订阅者收到后 log 通知宿主（通过 logger 回调收集验证）
+        let subBinary = "./target/release/bin/ystyle::cordis_plugin.examples.event_sub"
+        let emitBinary = "./target/release/bin/ystyle::cordis_plugin.examples.event_emit"
+        @Expect(exists(Path(subBinary)))
+        @Expect(exists(Path(emitBinary)))
+
+        // 收集宿主日志（验证订阅者收到事件后 log）
+        let logs = ArrayList<String>()
+        let logLock = Mutex()
+        let host = PluginHost(PluginManager(), { _, line =>
+            synchronized(logLock) {
+                logs.add(line)
+            }
+        })
+
+        // 1. 先拉起订阅者（保证订阅先注册）
+        let subEntry = PluginEntry("event-sub", subBinary)
+        host.launchPlugin(subEntry)
+        // 等待订阅者注册订阅（通过宿主日志 "subscribe stats/report" 验证）
+        var subscribed = false
+        for (i in 0..100) {
+            synchronized(logLock) {
+                for (line in logs) {
+                    if (line.contains("subscribe stats/report")) {
+                        subscribed = true
+                        break
+                    }
+                }
+            }
+            if (subscribed) {
+                break
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(subscribed)
+
+        // 2. 拉起发布者（启动后 emit 两个事件）
+        let emitEntry = PluginEntry("event-emit", emitBinary)
+        host.launchPlugin(emitEntry)
+
+        // 3. 等待订阅者收到事件并 log（"received stats/report count=..."）
+        var received = false
+        for (i in 0..100) {
+            synchronized(logLock) {
+                for (line in logs) {
+                    if (line.contains("received stats/report count=1.0") ||
+                        line.contains("received stats/report count=1")) {
+                        received = true
+                        break
+                    }
+                }
+            }
+            if (received) {
+                break
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(received)
+
+        // 4. 清理：卸载订阅者，验证订阅被清理
+        host.removePlugin("event-sub")
+        @Expect(host.eventRegistry.subscriberCount("stats/report"), 0)
+        host.removePlugin("event-emit")
     }
 }
