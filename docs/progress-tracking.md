@@ -2,20 +2,23 @@
 
 > 仓颉 Cordis 动态组合框架 —— 「微内核 + 进程隔离」插件框架
 > 设计文档：`docs/design.md`（v1.0 草案）、`docs/design-impl.md`（v2.0 实现级）
+> 仓库：https://atomgit.com/ystyle/cordis-cj.git（MIT）
 
-## 总体计划（P0–P4）
+## 总体计划（P0–P5）
 
 | 阶段 | 内容 | 状态 |
 | :--- | :--- | :--- |
 | P0 | cordis_core：协议消息类 + 统一配置加载（TOML/JSON） | ✅ 完成 |
-| P1 | cordis_host：PipeTransport + PluginManager（进程管理） | ⬜ |
-| P2 | cordis_plugin：插件 SDK（PluginRuntime + 服务注册 + invoke 转发） | ⬜ |
-| P3 | Reconciler 全量 + 端到端测试 | ⬜ |
-| P4 | 宏层 @plugin/@inject/@provide（参考 kux-cj @Crud、CJson @JsonSerializable） | ⬜ |
+| P1 | cordis_host：PipeTransport + PluginManager（进程管理） | ✅ 完成 |
+| P2 | cordis_plugin：插件 SDK（PluginRuntime + 服务注册 + invoke 转发） | ✅ 完成 |
+| P3 | Reconciler 全量 + 端到端测试 | ✅ 完成 |
+| P4 | 宏层 @Plugin/@Provide + 外部插件示例 | ✅ 完成 |
+| P5 | 泛型类型安全 API：invoke<T,R> / registerHandler<T,R> | ✅ 完成 |
+| — | 收尾：合并 master、README、LICENSE、remote、workspace 依赖简化 | ✅ 完成 |
 
 ## 已完成
 
-### P0 — cordis_core（提交 `835d369`，分支 `feat/cordis-core`）
+### P0 — cordis_core（提交 `835d369`）
 
 - **`cordis_core/src/methods.cj`**：JSON-RPC 方法名常量（initialize/initialized/provide/dispose/notify/log/invoke/ping/pong）+ NotifyKind/LogLevel 常量。
 - **`cordis_core/src/message.cj`**：8 个协议消息类（InitializeParams/Result、ProvideParams/Result、DisposeParams、NotifyParams、LogParams、InvokeParams），全部实现 `JsonSerializable`/`JsonDeserializable<T>`（`stdx.encoding.json.stream` 直通，jsonvalue 仅用于无固定结构的 config/args 字段）。
@@ -25,7 +28,7 @@
   - 同一结构 TOML/JSON 双格式读写，无格式耦合。
 - **测试**：`cordis_tests` 22 用例全通过（协议往返 16 + 配置 6）。
 
-### P1 — cordis_host（提交 `c4a1e1e`，分支 `feat/cordis-host`）
+### P1 — cordis_host（提交 `c4a1e1e`）
 
 - **`cordis_core/src/status.cj`**：`InstanceStatus` 枚举（Starting/Active/Unloading/Failed/Unreachable），`@Derive[Equatable]`。
 - **`cordis_host/src/pipe_transport.cj`**：`PipeTransport` 实现 jsonrpc `Transport` 接口——`send` 写子进程 stdin、`receive` 读子进程 stdout（EOF 返回 None，JsonRpcClient 自动停止 = 崩溃检测信号源）、`close` 置标志（OutputStream 无 close()，EOF 通知由 terminate 强杀完成）。
@@ -33,7 +36,7 @@
 - **`cordis_host/src/plugin_manager.cj`**：`PluginManager`——`launch`（三流 Pipe + 建连 + stderr 转发线程）、`terminate`（关连接 + 强杀 + wait 回收防僵尸）、`isExited`（client.isClosed 探测崩溃）、`forwardStderr`（StringReader 逐行转发）。
 - **测试**：新增 PipeTransport 5 用例（cat 回显/close/EOF/大消息 5000 字节）+ PluginManager 3 用例（生命周期/stderr 转发/进程退出探测），共 30 用例全通过（含真实子进程）。
 
-### P2 — cordis_plugin（提交 `76f30ae`，分支 `feat/cordis-plugin`）
+### P2 — cordis_plugin（提交 `76f30ae`）
 
 - **`cordis_plugin/src/service_registry.cj`**：`ServiceRegistry`——服务注册/撤销（undo_id → disposer）+ 可逆效果列表（effect，卸载逆序执行）+ 服务处理器注册与 invoke 分发（`invokeHandler(service, method, args)`）。
 - **`cordis_plugin/src/plugin_runtime.cj`**：`PluginContext`（provide/dispose/registerHandler/effect/invoke/log）+ `PluginRuntime.run(pluginId, inject, provide, handler)`——握手（initialize 请求）→ 注册服务（provide 请求拿 undo_id）→ 业务 handler → 阻塞等连接关闭 → 逆序 disposeAll。宿主 → 插件处理器：initialized/dispose/notify/ping/invoke。
@@ -41,7 +44,7 @@
 - **测试**：`FakeHost`（模拟宿主）验证完整流程：握手 + 双服务 provide、invoke 转发（calc.add = 2+3 → 5）、dispose 撤销、ping 探活。共 34 用例全通过。
 - **关键**：插件侧用 `JsonRpcServer.start()`（后台 receiveLoop）+ `request()`（主动请求宿主），不能 start()+serve() 双 receiveLoop；阻塞等待用轮询 `server.isClosed()`。
 
-### P3 — Reconciler + 端到端（提交 `776aeef`，分支 `feat/cordis-reconciler`）
+### P3 — Reconciler + 端到端（提交 `776aeef`）
 
 - **`cordis_host/src/host_state.cj`**：`HostState`——desired/actual/serviceIndex/undoMap，服务注册/撤销/按提供者清理。
 - **`cordis_host/src/plugin_host.cj`**：`PluginHost`——宿主侧 RPC 处理器（initialize 依赖检查 + provide 分配 undo_id + log 收集）、`launchPlugin`、`reconcile`（读 TOML → diff → 拓扑排序 → 先加后删 → 崩溃自愈 `healCrashed`）、`removePlugin`（终止 + 清理服务注册表）。
@@ -49,7 +52,7 @@
 - **`cordis_plugin/src/examples/e2e/main.cj`**：端到端测试插件（echo/add 两服务），静态编译为独立可执行。
 - **测试**：`EndToEndTest` 3 用例（真实宿主 + 真实插件进程）：完整生命周期（握手→服务注册→invoke 2+3=5→echo→热卸载清理）、配置调谐（TOML 拉起插件）、崩溃自愈（强杀后自动重启）。**共 37 用例全通过**。
 
-### P4 — 宏层 @Plugin/@Provide（提交中，分支 `feat/cordis-macros`）
+### P4 — 宏层 @Plugin/@Provide + 外部插件示例（提交 `264f1a9` + `31ce0a2`）
 
 - **`cordis_plugin/src/macros/plugin_macros.cj`**：`macro package ystyle::cordis_plugin.macros`
   - `@Plugin[]`（属性宏）：解析类声明 → 收集子宏 @Provide 消息（`getChildMessages("Provide")`）→ 生成 `main` + `PluginRuntime.run(类名, [], [keys], { ctx => let __plugin = 类名(); ctx.registerHandler(...) })` → 原类保持不变
@@ -57,14 +60,25 @@
   - 宏包 `public import ystyle::cordis_plugin.PluginRuntime` 重导出运行时符号（defer-cj/embed-cj 模式）
 - **`cordis_plugin/src/examples/macro_demo/main.cj`**：宏插件示例（@Plugin + 2×@Provide：echo/add），静态编译
 - **测试**：`EndToEndTest.testMacroPluginLifecycle`——真实宿主拉起宏插件：握手 → 双服务注册 → invoke add(2,3)=5 → echo("hello-macro") → 热卸载。**共 38 用例全通过**。
-
-### P4.1 — 外部插件示例（独立模块，不使用宏）
-
 - **`cordis_examples/`**：独立模块插件示例（`PluginRuntime.run` 显式 API），模拟外部插件作者项目。
-- **验证**：带 org 的普通库（cordis_plugin）被独立模块跨模块依赖**完全正常**（cjpm 缺陷只影响宏包，不影响普通库）；插件握手/服务注册/invoke(7+8=15)/热卸载全通。
-- **测试**：`EndToEndTest.testExternalPluginLifecycle`——真实宿主拉起独立模块插件。**共 39 用例全通过**。
-- **意义**：宏缺陷的规避方案 B 落地——外部插件作者用显式 API 写法即可，无需等待 cjpm 修复。
-- **关键**：宏调用大小写敏感（定义 `Plugin` 调用 `@Plugin[]`）；属性宏需 `[]`（`@Plugin[]` 空属性合法）；`@Inject`（字段→prop getter）记为后续增强。
+  - 验证带 org 的普通库（cordis_plugin）被独立模块跨模块依赖**完全正常**（cjpm 缺陷只影响宏包，不影响普通库）。
+  - 测试：`EndToEndTest.testExternalPluginLifecycle`——真实宿主拉起独立模块插件（握手/服务注册/invoke 7+8=15/热卸载）。**共 39 用例全通过**。
+  - 意义：宏缺陷规避方案 B 落地——外部插件作者用显式 API 写法即可。
+
+### P5 — 泛型类型安全 API（提交 `26c76fa` + `c8fb003`，合并 `b51f30a` + `056b23e`）
+
+- **`PluginContext.invoke<T, R>(service, method, args: Array<T>): R`**：参数自动序列化（`T <: JsonSerializable`）、返回自动反序列化（`R <: JsonDeserializable<R>`），与现有 `invoke(Array<JsonValue>)` 共存无冲突。
+- **`PluginContext.registerHandler<T, R>(key, handler: (String, Array<T>) -> R)`**：参数自动反序列化（`T <: JsonDeserializable<T>`）、返回自动序列化（`R <: JsonSerializable`）；泛型闭包包装后存入非泛型 handlers map（关键难点，实测可行）。
+- **收益**：调用方与服务端均省去手动 jsonvalue 转换，业务代码直接操作仓颉类型（基础类型或自定义 DTO），与 Cordis 类型化服务调用体验对齐。
+- **测试**：`GenericInvokeExperiment` 3 用例（Int64→String echo、Int64→Int64 add、自定义 DTO 往返）+ `GenericHandlerExperiment` 2 用例（Int64→String、AddRequest DTO→Int64）。**共 44 用例全通过**。
+
+### 收尾（提交 `c9ce254` / `647c1ca` / `584c2d2` / `1e78121` / `89f1e74`）
+
+- **分支合并**：P0–P4 + 泛型分支全部 `--no-ff` 合并回 master，feat 分支已删除。
+- **README**：架构图、宏插件/显式 API/泛型三种写法、模块划分、协议、测试指南。
+- **LICENSE**：根目录 MIT，各包 cjpm.toml 标注 license + repository。
+- **Git remote**：`https://atomgit.com/ystyle/cordis-cj.git`，已推送。
+- **workspace 依赖简化**：内部依赖从 path 改为纯版本号（cjpm 自动解析）；json-rpc 仓库的 `jsonrpc_tests` 同样纳入 workspace 成员（提交 `e3dced9`，35 用例通过）。
 
 ## 关键决策记录
 
@@ -74,22 +88,23 @@
 4. **jsonrpc 依赖**：中心仓 jsonrpc 0.4.2 无配套 jsonrpc_stdio（0.4.1 未发布）→ 全部改用本地 path 依赖 `../../json-rpc/jsonrpc`（版本一致、stdio 可用）。
 5. **帧协议改为换行帧（重要修正）**：仓颉 `ConsoleReader.read(Array<Byte>)` 在管道 stdin（子进程被 launch 拉起的场景）下永久阻塞，无法用于 Content-Length 帧；`readln()` 可靠。→ 插件侧 `LineStdioTransport`（readln 逐行 + 补回 `\n`）+ `NewlineFraming`，宿主侧 PipeTransport 同步 `NewlineFraming`（与 mcp-cj 生产方案一致）。设计文档 §4 的 Content-Length 帧在此环境不可行，已修正。
 6. **宏架构（P4）**：宏包与插件 SDK 同模块（CJson 模式）；宏展开代码引用运行时符号需宏包 `public import` 重导出；`@Plugin`/`@Provide` 是属性宏（双 Tokens 参数），调用须带 `[]`（`@Plugin[]` 空属性合法）且大小写匹配定义。
+7. **泛型 API（P5）**：`invoke<T,R>` / `registerHandler<T,R>` 用分开的约束（`T <: JsonSerializable, R <: JsonDeserializable<R>`），避免交集约束 `T <: A & B<T>` 的推断问题；与 JsonValue 版共存无重载冲突（实测）。
+8. **workspace 依赖**：成员间依赖用纯版本号自动解析，不写 path（cjpm workspace 自动处理）；非成员外部依赖（jsonrpc）保留 path。
 
 ## 工程要点（踩坑记录）
 
 - cjpm workspace 中，源码包声明必须用全限定名：`package ystyle::cordis_core`（`organization::name`）。
-- workspace 依赖引用同样用全限定名：`"ystyle::cordis_core" = { path = "../cordis_core" }`。
-- test-members 必须是 build-members 的子集。
+- workspace 成员间依赖用纯版本号（`"ystyle::cordis_core" = "0.1.0"`）自动解析；test-members 必须是 build-members 的子集。
 - `ArrayList` 构造：`ArrayList.of([...])`（Array→ArrayList）；`ArrayList(x)` 是容量构造。
 - tomlcj 的 `parse(str).mapping` 的 mapping 非 public，字符串解析应走 `Decoder(ByteBuffer(str.toArray()))`。
 - `@Expect` 比较 JsonValue 需要 Equatable（jsonvalue 未实现）→ 用 `match` 断言。
-- 泛型交集约束 `T <: A & B<T>` 在 `JsonValue.fromObject/toObject` 处推断困难 → 测试往返直接用 `JsonWriter`/`JsonReader` 直通，不经 jsonvalue。
+- 泛型交集约束 `T <: A & B<T>` 在 `JsonValue.fromObject/toObject` 处推断困难 → 泛型方法用分开的约束（`T <: JsonSerializable, R <: JsonDeserializable<R>`）；测试往返直接用 `JsonWriter`/`JsonReader` 直通。
 - `OutputStream` 无 `close()` 接口 → PipeTransport.close 只置标志，通知插件 EOF 由 terminate 强杀完成（stdout 关闭 → 宿主 receive EOF）。
 - 函数类型参数不能直接用 lambda 字面量做默认值 → 拆两个 init 重载。
 - `InstanceStatus` 枚举比较需要 `@Derive[Equatable]`（默认无 `==`）。
 - 测试真实子进程：cat 不退出时 `readToEnd` 会永久阻塞 → 循环 receive 计数收满 + `terminate(force: true)` + `wait()` 防僵尸。
 - 测试挂起时用 `timeout 120 cjpm test` 包裹防死锁。
-- 仓颉测试类内不能嵌套 class → 辅助类（FakeHost）放 @Test 类外顶层；测试辅助文件若无 @Test 宏会报 main 缺失 → 辅助类并入有 @Test 的测试文件。
+- 仓颉测试类内不能嵌套 class → 辅助类（FakeHost）放 @Test 类外顶层；测试辅助文件若无 @Test 宏会报 main 缺失 → 辅助类并入有 @Test 的测试文件；executable 包不能自 import → 测试辅助类需在文件内内嵌。
 - 无参 lambda 语法是 `{ => expr }`，不是 `{ () => expr }`。
 - `JsonValue` 的 `[](key)` 返回 `?JsonValue`（Option），match 需 `case Some(JsonValue.String(k))`。
 - `JsonRpcClient.call("method")` 无参重载是非泛型的，不能带 `<T, R>` 类型参数。
@@ -103,12 +118,16 @@
   - TokenKind 无 LBRACKET/RBRACKET，方括号是 `LSQUARE`/`RSQUARE`。
   - 属性宏调用必须带 `[]` 且大小写匹配定义：`@Plugin[]`（不是 `@plugin`）。
   - 宏展开代码引用运行时符号：宏包 `public import ystyle::cordis_plugin.PluginRuntime`，展开代码用短名（不能用 `ystyle::cordis_plugin.PluginRuntime` 限定路径，宏展开上下文解析失败）。
-  - 宏调用方与宏包同模块（CJson 模式）可行；**跨模块带 organization 的宏依赖传递有 cjpm 缺陷**（详见 [macro-org-dependency-issue.md](./macro-org-dependency-issue.md)：同模块带 org 可用、跨模块失败、去掉 org 跨模块立即可用）。
+  - **跨模块带 organization 的宏依赖传递有 cjpm 缺陷**（详见 [macro-org-dependency-issue.md](./macro-org-dependency-issue.md)：同模块带 org 可用、跨模块失败、去掉 org 跨模块立即可用；`organization` 必须是合法标识符，不能含 `.`）。
   - `getChildMessages("Provide")` 收集子宏消息：子宏 `assertParentContext("Plugin")` + `setItem("serviceKey"/"methodName")`。
   - quote 插值：`$(String)` 生成带引号字符串字面量；标识符用 `Token(TokenKind.IDENTIFIER, name)`；`$(ArrayList<Tokens>)` 有限制 → 用 `Tokens + Token(TokenKind.NL)` 手动拼接。
+- **泛型 API 踩坑（P5）**：
+  - `Array<T> |> map { a: T => JsonValue.fromObject(a) } |> collectArray` 需要 lambda 参数类型标注（`a: T`），否则无法推断。
+  - spawn 内捕获可变局部变量会报错 → 结果收集放进共享对象（如 FakeHost）的方法调用。
+  - `JsonValue` 的 map 赋值（`reqJson["a"] = ...`）不支持 → 先构造 `HashMap<String, JsonValue>` 再转 `JsonValue.Map`。
 
 ## 待办 / 下一步
 
 - [ ] @Inject 宏（字段 → 代理 getter，经宿主 invoke 转发）——P4 已交付 @Plugin/@Provide 核心，@Inject 后续补
 - [ ] 后续增强：initialize 依赖不满足时插件保持 Waiting 重试（当前直接拒绝）；事件总线（emit/waterfall）；配置热更新监听
-- [ ] 框架收尾：README、示例完善、发布流程（cangjie-publish）
+- [ ] 发布流程（cangjie-publish）：注意宏库带 organization 跨模块消费缺陷——若对外发布宏，评估去 org 或实测中心仓拉取路径
