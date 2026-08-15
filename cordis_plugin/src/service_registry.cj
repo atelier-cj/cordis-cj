@@ -1,8 +1,8 @@
 package ystyle::cordis_plugin
 
 import jsonvalue.JsonValue
-import std.collection.HashMap
-import std.collection.ArrayList
+import stdx.encoding.json.stream.{JsonSerializable, JsonDeserializable}
+import std.collection.{HashMap, ArrayList, map, collectArray}
 import std.sync.Mutex
 
 /**
@@ -34,6 +34,29 @@ public class ServiceRegistry {
     public func registerHandler(key: String, handler: (String, Array<JsonValue>) -> JsonValue): Unit {
         synchronized(this.lock) {
             this.handlers[key] = handler
+        }
+    }
+
+    /**
+     * 注册服务处理器（泛型版）
+     *
+     * 参数自动反序列化（T <: JsonDeserializable<T>），返回值自动序列化
+     * （R <: JsonSerializable），服务端 handler 直接操作仓颉类型，
+     * 省去手动 JsonValue 转换。
+     *
+     * @param key 服务 Key（与 provide 的 Key 对应）
+     * @param handler (method, args: Array<T>) -> R
+     */
+    public func registerHandler<T, R>(key: String, handler: (String, Array<T>) -> R): Unit
+        where T <: JsonDeserializable<T>, R <: JsonSerializable {
+        let wrapped: (String, Array<JsonValue>) -> JsonValue = { method, jsonArgs =>
+            // JsonValue[] → Array<T>（逐个反序列化）
+            let typedArgs = jsonArgs |> map { j => JsonValue.toObject<T>(j) } |> collectArray
+            let result = handler(method, typedArgs)
+            JsonValue.fromObject(result)
+        }
+        synchronized(this.lock) {
+            this.handlers[key] = wrapped
         }
     }
 
