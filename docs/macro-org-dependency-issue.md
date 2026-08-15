@@ -143,9 +143,10 @@ import cordis_plugin.macros.Plugin
 ## 5. 复现步骤（最小示例）
 
 > 分隔符约定：`orgname::pkgname.subpkg` —— organization 与包名之间用 `::`，包内子包用 `.`。
+> 注意：`organization` 本身必须是合法标识符（字母/数字/下划线），**不能含 `.`**，例如 `example_org`（而非 `com.example`）。
 
-1. 模块 `mylib` 声明 `organization = "com.example"`（完整包名 `com.example::mylib`），内含 `macro package com.example::mylib.macros`，定义 `public macro Foo(...)`。
-2. 另一模块 `myapp` 依赖 `"com.example::mylib" = { path = "../mylib" }`，源码 `import com.example::mylib.macros.Foo` + `@Foo[]`。
+1. 模块 `mylib` 声明 `organization = "example_org"`（完整包名 `example_org::mylib`），内含 `macro package example_org::mylib.macros`，定义 `public macro Foo(...)`。
+2. 另一模块 `myapp` 依赖 `"example_org::mylib" = { path = "../mylib" }`，源码 `import example_org::mylib.macros.Foo` + `@Foo[]`。
 3. `cjpm build` → `undeclared identifier 'foo'` + import unused。
 4. 去掉 `mylib/cjpm.toml` 的 `organization`（完整包名变为 `mylib`），同步改依赖名为 `"mylib"` → 编译通过。
 
