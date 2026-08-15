@@ -21,8 +21,10 @@ import std.sync.Mutex
 public class PluginHost {
     public let state: HostState = HostState()
     public let manager: PluginManager
+    public let eventRegistry: EventRegistry = EventRegistry()
     private let logger: (String, String) -> Unit
     private var undoCounter: Int64 = 0
+    private var emitCounter: Int64 = 0
     private let lock: Mutex = Mutex()
 
     public init(manager: PluginManager, logger: (String, String) -> Unit) {
@@ -101,7 +103,8 @@ public class PluginHost {
             }
         })
 
-        // 插件 → 宿主：log 通知
+        // 插件 → 宿主：通知（log / events/emit）
+        // 注意：setNotificationCallback 只能设置一个回调，合并处理多种通知
         client.setNotificationCallback({ notif =>
             if (notif.method == Methods.LOG) {
                 match (notif.params) {
@@ -111,8 +114,58 @@ public class PluginHost {
                         }
                     case None => ()
                 }
+            } else if (notif.method == Methods.EVENTS_EMIT) {
+                match (notif.params) {
+                    case Some(p) =>
+                        try {
+                            let params = JsonValue.toObject<EmitParams>(p)
+                            let emitId = this.allocateEmitId()
+                            let delivered = this.eventRegistry.dispatchEmit(params, emitId)
+                            this.logger(providerId, "emit ${params.event} -> ${delivered} subscribers")
+                        } catch (e: Exception) {
+                            this.logger(providerId, "emit error: ${e.message}")
+                        }
+                    case None => ()
+                }
             }
         })
+
+        // 事件总线：插件 → 宿主 订阅 / 退订（docs/design-events.md §5.3）
+        client.registerRequestHandler(Methods.EVENTS_SUBSCRIBE, { req =>
+            match (req.params) {
+                case Some(p) =>
+                    try {
+                        let params = JsonValue.toObject<SubscribeParams>(p)
+                        let subscriptionId = this.eventRegistry.subscribe(params.event, providerId, instance)
+                        this.logger(providerId, "subscribe ${params.event} -> ${subscriptionId}")
+                        Some(JsonValue.fromObject(SubscribeResult(subscriptionId)))
+                    } catch (e: Exception) {
+                        this.logger(providerId, "subscribe error: ${e.message}")
+                        None
+                    }
+                case None => None
+            }
+        })
+        client.registerRequestHandler(Methods.EVENTS_UNSUBSCRIBE, { req =>
+            match (req.params) {
+                case Some(p) =>
+                    try {
+                        let params = JsonValue.toObject<UnsubscribeParams>(p)
+                        let removed = this.eventRegistry.unsubscribe(params.subscriptionId)
+                        Some(JsonValue.Boolean(removed))
+                    } catch (e: Exception) {
+                        Some(JsonValue.Boolean(false))
+                    }
+                case None => Some(JsonValue.Boolean(false))
+            }
+        })
+    }
+
+    private func allocateEmitId(): String {
+        synchronized(this.lock) {
+            this.emitCounter++
+            "emit-${this.emitCounter}"
+        }
     }
 
     /**
@@ -258,6 +311,7 @@ public class PluginHost {
         match (instance) {
             case Some(inst) =>
                 this.logger(id, "removing")
+                this.eventRegistry.unsubscribeAll(id)   // 清理事件订阅（docs/design-events.md §8）
                 this.state.clearServicesByProvider(id)
                 try {
                     this.manager.terminate(inst)

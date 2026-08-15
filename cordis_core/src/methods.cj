@@ -13,6 +13,11 @@ public class Methods {
     public static let INVOKE: String = "invoke"              // 宿主转发服务调用
     public static let PING: String = "ping"                  // 宿主 → 插件（请求，探活）
     public static let PONG: String = "pong"                  // 插件 → 宿主（响应 ping）
+    // 事件总线（docs/design-events.md §4）
+    public static let EVENTS_SUBSCRIBE: String = "events/subscribe"      // 插件 → 宿主（请求，返回订阅 id）
+    public static let EVENTS_UNSUBSCRIBE: String = "events/unsubscribe"  // 插件 → 宿主（请求）
+    public static let EVENTS_EMIT: String = "events/emit"                // 插件 → 宿主（通知，发布事件）
+    public static let EVENTS_DISPATCH: String = "events/dispatch"        // 宿主 → 插件（请求，派发事件）
 
     private init() {}
 }

@@ -4,7 +4,7 @@ import ystyle::cordis_core.*
 import ystyle::jsonrpc.*
 import jsonvalue.*
 import stdx.encoding.json.stream.{JsonSerializable, JsonDeserializable}
-import std.collection.{map, collectArray}
+import std.collection.{HashMap, map, collectArray}
 import std.sync.Mutex
 
 /**
@@ -110,6 +110,32 @@ public class PluginContext {
     public func log(level: String, message: String): Unit {
         this.runtime.sendLog(level, message)
     }
+
+    /**
+     * 订阅事件（docs/design-events.md §6）
+     *
+     * 事件经宿主路由：任意插件 emit 该事件时，本监听器被调用。
+     * 订阅是效果：插件卸载时自动退订（对齐 Cordis ctx.on 语义）。
+     *
+     * @param event 事件名
+     * @param listener 回调（事件参数列表）
+     * @return 订阅 id
+     */
+    public func on(event: String, listener: (Array<JsonValue>) -> Unit): String {
+        this.runtime.subscribeEvent(event, listener)
+    }
+
+    /**
+     * 发布事件（docs/design-events.md §6）
+     *
+     * 通知宿主扇出给所有订阅者，发布者不等待、不感知订阅者。
+     *
+     * @param event 事件名
+     * @param args 事件参数
+     */
+    public func emit(event: String, args: Array<JsonValue>): Unit {
+        this.runtime.emitEvent(event, args)
+    }
 }
 
 /**
@@ -131,6 +157,8 @@ public class PluginRuntime {
     private let server: JsonRpcServer
     private let pluginId: String
     private let lock: Mutex = Mutex()
+    // 事件监听器：事件名 -> listener（docs/design-events.md §6）
+    private let listeners: HashMap<String, (Array<JsonValue>) -> Unit> = HashMap<String, (Array<JsonValue>) -> Unit>()
 
     /**
      * 以插件自身 stdio 为传输层启动（插件 main 的标准入口）
@@ -214,6 +242,29 @@ public class PluginRuntime {
         this.server.register(Methods.PING, { _ => HandlerResult.ok(JsonValue.Boolean(true)) })
         // invoke：宿主转发的服务调用
         this.server.register(Methods.INVOKE, { ctx => this.handleInvoke(ctx) })
+        // events/dispatch：宿主派发事件（docs/design-events.md §6）
+        this.server.register(Methods.EVENTS_DISPATCH, { ctx => this.handleEventDispatch(ctx) })
+    }
+
+    private func handleEventDispatch(ctx: HandlerContext): HandlerResult {
+        match (ctx.getParams<DispatchParams>()) {
+            case Some(params) =>
+                var listener: ?(Array<JsonValue>) -> Unit = None
+                synchronized(this.lock) {
+                    // dispatch 携带事件名；按事件名查找本地监听器
+                    if (this.listeners.contains(params.event)) {
+                        listener = this.listeners[params.event]
+                    }
+                }
+                match (listener) {
+                    case Some(l) =>
+                        l(params.args)
+                        HandlerResult.ok(JsonValue.Boolean(true))
+                    case None =>
+                        HandlerResult.ok(JsonValue.Boolean(false))   // 无监听器，静默成功
+                }
+            case None => HandlerResult.err(ErrorCodes.INVALID_PARAMS, "invalid dispatch params")
+        }
     }
 
     private func handleDispose(ctx: HandlerContext): HandlerResult {
@@ -289,5 +340,45 @@ public class PluginRuntime {
         get() {
             this.server
         }
+    }
+
+    /**
+     * 订阅事件（docs/design-events.md §6）
+     * @param event 事件名
+     * @param listener 回调（参数列表）
+     * @return 订阅 id；插件卸载时自动退订（effect 语义）
+     */
+    internal func subscribeEvent(event: String, listener: (Array<JsonValue>) -> Unit): String {
+        // 1. 向宿主发 events/subscribe 请求
+        let result = this.server.request<SubscribeParams, SubscribeResult>(
+            Methods.EVENTS_SUBSCRIBE,
+            params: SubscribeParams(event))
+        let subscriptionId = match (result) {
+            case Ok(r) => r.subscriptionId
+            case Err(e) => throw Exception("subscribe '${event}' failed: ${e}")
+        }
+        // 2. 存本地监听器（按事件名）
+        synchronized(this.lock) {
+            this.listeners[event] = listener
+        }
+        // 3. 注册退订 effect：插件卸载时自动退订
+        this.registry.effect({ =>
+            try {
+                this.server.request<UnsubscribeParams, JsonValue>(
+                    Methods.EVENTS_UNSUBSCRIBE,
+                    params: UnsubscribeParams(subscriptionId))
+            } catch (e: Exception) {
+                ()
+            }
+        })
+        subscriptionId
+    }
+
+    /**
+     * 发布事件（docs/design-events.md §6）：通知宿主扇出，不等待订阅者
+     */
+    internal func emitEvent(event: String, args: Array<JsonValue>): Unit {
+        this.server.notify<EmitParams>(Methods.EVENTS_EMIT,
+            params: EmitParams(event, args))
     }
 }

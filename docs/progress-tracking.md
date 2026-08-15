@@ -4,7 +4,7 @@
 > 设计文档：`docs/design.md`（v1.0 草案）、`docs/design-impl.md`（v2.0 实现级）
 > 仓库：https://atomgit.com/ystyle/cordis-cj.git（MIT）
 
-## 总体计划（P0–P5）
+## 总体计划（P0–P6）
 
 | 阶段 | 内容 | 状态 |
 | :--- | :--- | :--- |
@@ -14,6 +14,7 @@
 | P3 | Reconciler 全量 + 端到端测试 | ✅ 完成 |
 | P4 | 宏层 @Plugin/@Provide + 外部插件示例 | ✅ 完成 |
 | P5 | 泛型类型安全 API：invoke<T,R> / registerHandler<T,R> | ✅ 完成 |
+| P6 | 事件总线：EventRegistry + ctx.on/emit + 端到端 | ✅ 完成 |
 | — | 收尾：合并 master、README、LICENSE、remote、workspace 依赖简化 | ✅ 完成 |
 
 ## 已完成
@@ -72,6 +73,15 @@
 - **收益**：调用方与服务端均省去手动 jsonvalue 转换，业务代码直接操作仓颉类型（基础类型或自定义 DTO），与 Cordis 类型化服务调用体验对齐。
 - **测试**：`GenericInvokeExperiment` 3 用例（Int64→String echo、Int64→Int64 add、自定义 DTO 往返）+ `GenericHandlerExperiment` 2 用例（Int64→String、AddRequest DTO→Int64）。**共 44 用例全通过**。
 
+### P6 — 事件总线（分支 `feat/event-bus`，设计 `docs/design-events.md`）
+
+- **协议（P6.1，提交 `732b0d1`）**：`methods.cj` 新增 `events/subscribe`/`events/unsubscribe`/`events/emit`/`events/dispatch`；`message.cj` 新增 SubscribeParams/Result、UnsubscribeParams、EmitParams、DispatchParams（全部 JsonSerializable）。10 用例。
+- **宿主 EventRegistry（P6.2，提交 `c129de3`）**：`event_registry.cj`——订阅/退订/按插件清理/subscriberCount/dispatch（同步按注册顺序，派发失败自动清理崩溃订阅者）；`plugin_host.cj` 接入 subscribe/unsubscribe/emit 处理器 + removePlugin 清理订阅。4 用例。
+- **插件侧 API（P6.3，提交 `3545ebf`）**：`PluginContext.on(event, listener)`（effect 自动退订）/ `emit(event, args)`；PluginRuntime 注册 `events/dispatch` 本地处理器（按事件名分发监听器）。2 用例。
+- **端到端（P6.4，提交 `afe6d17`）**：`examples/event_sub` + `examples/event_emit` 真实插件；`EndToEndTest.testEventBusEndToEnd`——订阅者先注册 → 发布者 emit 2 事件 → 宿主路由 → 订阅者收到并 log → 卸载后订阅清理。**共 61 用例全通过**。
+- **关键修复**：PluginHost 的 `setNotificationCallback` 只能设一个回调——log 与 events/emit 必须合并处理，独立回调会覆盖导致 log 丢失。
+- **事件参数**：`Array<JsonValue>`（动态结构，jsonvalue 合法使用）；v2 增强：waterfall/parallel/serial 派发模式、`on<T>` 类型安全重载（见 design-events.md §11 范围外）。
+
 ### 收尾（提交 `c9ce254` / `647c1ca` / `584c2d2` / `1e78121` / `89f1e74`）
 
 - **分支合并**：P0–P4 + 泛型分支全部 `--no-ff` 合并回 master，feat 分支已删除。
@@ -129,5 +139,6 @@
 ## 待办 / 下一步
 
 - [ ] @Inject 宏（字段 → 代理 getter，经宿主 invoke 转发）——P4 已交付 @Plugin/@Provide 核心，@Inject 后续补
-- [ ] 后续增强：initialize 依赖不满足时插件保持 Waiting 重试（当前直接拒绝）；事件总线（emit/waterfall）；配置热更新监听
+- [ ] 事件总线 v2：waterfall/parallel/serial 派发模式、`on<T>` 类型安全重载（v1 已交付 emit 同步广播）
+- [ ] 后续增强：initialize 依赖不满足时插件保持 Waiting 重试（当前直接拒绝）；配置热更新监听
 - [ ] 发布流程（cangjie-publish）：注意宏库带 organization 跨模块消费缺陷——若对外发布宏，评估去 org 或实测中心仓拉取路径

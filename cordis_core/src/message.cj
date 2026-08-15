@@ -294,3 +294,168 @@ public class InvokeParams <: JsonSerializable & JsonDeserializable<InvokeParams>
         InvokeParams(service.getOrThrow(), method.getOrThrow(), args.getOrThrow())
     }
 }
+
+/**
+ * events/subscribe.params（插件 → 宿主）
+ */
+public class SubscribeParams <: JsonSerializable & JsonDeserializable<SubscribeParams> {
+    public let event: String
+
+    public init(event: String) {
+        this.event = event
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("event").writeValue(this.event)
+        w.endObject()
+    }
+
+    public static func fromJson(r: JsonReader): SubscribeParams {
+        r.startObject()
+        var event: ?String = None
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "event" => event = r.readValue<String>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        SubscribeParams(event.getOrThrow())
+    }
+}
+
+/**
+ * events/subscribe 响应 result（宿主 → 插件）：返回订阅 id
+ */
+public class SubscribeResult <: JsonSerializable & JsonDeserializable<SubscribeResult> {
+    public let subscriptionId: String
+
+    public init(subscriptionId: String) {
+        this.subscriptionId = subscriptionId
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("subscriptionId").writeValue(this.subscriptionId)
+        w.endObject()
+    }
+
+    public static func fromJson(r: JsonReader): SubscribeResult {
+        r.startObject()
+        var subscriptionId: ?String = None
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "subscriptionId" => subscriptionId = r.readValue<String>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        SubscribeResult(subscriptionId.getOrThrow())
+    }
+}
+
+/**
+ * events/unsubscribe.params（插件 → 宿主）
+ */
+public class UnsubscribeParams <: JsonSerializable & JsonDeserializable<UnsubscribeParams> {
+    public let subscriptionId: String
+
+    public init(subscriptionId: String) {
+        this.subscriptionId = subscriptionId
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("subscriptionId").writeValue(this.subscriptionId)
+        w.endObject()
+    }
+
+    public static func fromJson(r: JsonReader): UnsubscribeParams {
+        r.startObject()
+        var subscriptionId: ?String = None
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "subscriptionId" => subscriptionId = r.readValue<String>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        UnsubscribeParams(subscriptionId.getOrThrow())
+    }
+}
+
+/**
+ * events/emit.params（插件 → 宿主，通知）：发布事件
+ */
+public class EmitParams <: JsonSerializable & JsonDeserializable<EmitParams> {
+    public let event: String
+    public let args: Array<JsonValue>
+
+    public init(event: String, args: Array<JsonValue>) {
+        this.event = event
+        this.args = args
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("event").writeValue(this.event)
+        w.writeName("args").writeValue(this.args)
+        w.endObject()
+    }
+
+    public static func fromJson(r: JsonReader): EmitParams {
+        r.startObject()
+        var event: ?String = None
+        var args: ?Array<JsonValue> = None
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "event" => event = r.readValue<String>()
+                case "args" => args = r.readValue<Array<JsonValue>>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        EmitParams(event.getOrThrow(), args.getOrThrow())
+    }
+}
+
+/**
+ * events/dispatch.params（宿主 → 插件，请求）：向单个订阅者派发事件
+ */
+public class DispatchParams <: JsonSerializable & JsonDeserializable<DispatchParams> {
+    public let event: String
+    public let args: Array<JsonValue>
+    public let emitId: String
+
+    public init(event: String, args: Array<JsonValue>, emitId: String) {
+        this.event = event
+        this.args = args
+        this.emitId = emitId
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("event").writeValue(this.event)
+        w.writeName("args").writeValue(this.args)
+        w.writeName("emitId").writeValue(this.emitId)
+        w.endObject()
+    }
+
+    public static func fromJson(r: JsonReader): DispatchParams {
+        r.startObject()
+        var event: ?String = None
+        var args: ?Array<JsonValue> = None
+        var emitId: ?String = None
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "event" => event = r.readValue<String>()
+                case "args" => args = r.readValue<Array<JsonValue>>()
+                case "emitId" => emitId = r.readValue<String>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        DispatchParams(event.getOrThrow(), args.getOrThrow(), emitId.getOrThrow())
+    }
+}
