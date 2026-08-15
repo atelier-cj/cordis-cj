@@ -103,8 +103,7 @@ public class PluginHost {
             }
         })
 
-        // 插件 → 宿主：通知（log / events/emit）
-        // 注意：setNotificationCallback 只能设置一个回调，合并处理多种通知
+        // 插件 → 宿主：log 通知（JsonRpcClient 支持多回调，独立注册）
         client.setNotificationCallback({ notif =>
             if (notif.method == Methods.LOG) {
                 match (notif.params) {
@@ -114,7 +113,12 @@ public class PluginHost {
                         }
                     case None => ()
                 }
-            } else if (notif.method == Methods.EVENTS_EMIT) {
+            }
+        })
+
+        // 插件 → 宿主：events/emit 通知 → 宿主扇出给订阅者（add 追加，不与 log 冲突）
+        client.addNotificationCallback({ notif =>
+            if (notif.method == Methods.EVENTS_EMIT) {
                 match (notif.params) {
                     case Some(p) =>
                         try {
