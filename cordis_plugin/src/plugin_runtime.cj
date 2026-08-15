@@ -3,6 +3,8 @@ package ystyle::cordis_plugin
 import ystyle::cordis_core.*
 import ystyle::jsonrpc.*
 import jsonvalue.*
+import stdx.encoding.json.stream.{JsonSerializable, JsonDeserializable}
+import std.collection.{map, collectArray}
 import std.sync.Mutex
 
 /**
@@ -61,12 +63,31 @@ public class PluginContext {
      * 经宿主转发调用其他插件的服务
      * @param service 目标服务 Key
      * @param method 服务方法名
-     * @param args 参数列表
+     * @param args 参数列表（JsonValue，手动构造）
      * @return 服务返回值（JSON）
      * @throws Exception 宿主返回错误或调用超时
      */
     public func invoke(service: String, method: String, args: Array<JsonValue>): JsonValue {
         this.runtime.invokeService(service, method, args)
+    }
+
+    /**
+     * 经宿主转发调用其他插件的服务（泛型版）
+     *
+     * 参数自动序列化（T <: JsonSerializable），返回值自动反序列化
+     * （R <: JsonDeserializable<R>），省去调用方手动 JsonValue 转换。
+     *
+     * @param service 目标服务 Key
+     * @param method 服务方法名
+     * @param args 参数列表（任意可序列化类型）
+     * @return 服务返回值（自动反序列化为 R）
+     * @throws Exception 宿主返回错误或调用超时
+     */
+    public func invoke<T, R>(service: String, method: String, args: Array<T>): R
+        where T <: JsonSerializable, R <: JsonDeserializable<R> {
+        let jsonArgs = args |> map { a: T => JsonValue.fromObject(a) } |> collectArray
+        let result = this.runtime.invokeService(service, method, jsonArgs)
+        JsonValue.toObject<R>(result)
     }
 
     /**
