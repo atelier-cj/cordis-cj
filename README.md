@@ -163,7 +163,35 @@ main(): Int64 {
   "jsonvalue" = "1.1.0"
 ```
 
-`PluginContext` 提供：`provide` / `dispose` / `registerHandler` / `effect`（可逆效果）/ `invoke` / `log`。
+### 泛型版本（推荐：省去手动 JsonValue 转换）
+
+`registerHandler<T, R>` 与 `invoke<T, R>` 自动完成序列化/反序列化，业务代码直接操作仓颉类型（基础类型或自定义 DTO）：
+
+```cangjie
+// 自定义 DTO（实现 json.stream 的 JsonSerializable / JsonDeserializable 接口）
+public class AddRequest <: JsonSerializable & JsonDeserializable<AddRequest> {
+    public let a: Int64
+    public let b: Int64
+    public init(a: Int64, b: Int64) { this.a = a; this.b = b }
+    public func toJson(w: JsonWriter): Unit { /* ... */ }
+    public static func fromJson(r: JsonReader): AddRequest { /* ... */ }
+}
+
+main(): Int64 {
+    PluginRuntime.run("my-plugin", [], ["calc"], { ctx =>
+        // 服务端：参数 Array<AddRequest> 自动反序列化，返回 Int64 自动序列化
+        ctx.registerHandler<AddRequest, Int64>("calc", { method, args =>
+            args[0].a + args[0].b
+        })
+    })
+    return 0
+}
+
+// 调用方（另一插件内）：参数自动序列化，返回自动反序列化为 String
+// let sum = ctx.invoke<AddRequest, String>("calc", "add", [AddRequest(2, 3)])
+```
+
+`PluginContext` 提供：`provide` / `dispose` / `registerHandler`（含泛型版）/ `effect`（可逆效果）/ `invoke`（含泛型版）/ `log`。
 
 > 两种写法对照：**宏写法**（`@Plugin[]`/`@Provide[]`）适合宏包与插件同模块的场景（如框架内置插件）；**显式 API 写法**适合独立模块的外部插件（不受宏缺陷影响）。两者最终行为一致。
 
@@ -192,7 +220,7 @@ eval "$(cjvs env zsh)" && eval "$(cjvs stdx-env zsh)"
 cjpm test -j 16 --no-progress
 ```
 
-39 个用例，覆盖：协议序列化往返、配置解析、管道传输（真实子进程）、进程管理、插件运行时（内存双端对接）、端到端（真实宿主 ↔ 真实插件进程：握手/服务注册/invoke/热卸载/崩溃自愈）、宏插件生命周期、独立模块外部插件生命周期。
+44 个用例，覆盖：协议序列化往返、配置解析、管道传输（真实子进程）、进程管理、插件运行时（内存双端对接）、端到端（真实宿主 ↔ 真实插件进程：握手/服务注册/invoke/热卸载/崩溃自愈）、宏插件生命周期、独立模块外部插件生命周期、泛型 invoke/registerHandler 全链路。
 
 ## 文档
 
