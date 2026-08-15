@@ -1,7 +1,7 @@
 package ystyle::cordis_host
 
 import ystyle::cordis_core.{PluginEntry, InstanceStatus}
-import ystyle::jsonrpc.JsonRpcClient
+import ystyle::jsonrpc.{JsonRpcClient, NewlineFraming}
 import std.process.{launch, SubProcess, ProcessRedirect}
 import std.io.StringReader
 import std.sync.Mutex
@@ -37,7 +37,8 @@ public class PluginManager {
             stdOut: ProcessRedirect.Pipe,
             stdErr: ProcessRedirect.Pipe)
         let transport = PipeTransport(proc)
-        let client = JsonRpcClient(transport)
+        // 换行帧协议：与插件侧 LineStdioTransport（readln 逐行）保持一致
+        let client = JsonRpcClient(transport, framing: NewlineFraming())
         client.start()
         let instance = PluginInstance(entry, proc, client)
         this.forwardStderr(instance)

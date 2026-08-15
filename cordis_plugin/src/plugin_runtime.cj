@@ -2,7 +2,6 @@ package ystyle::cordis_plugin
 
 import ystyle::cordis_core.*
 import ystyle::jsonrpc.*
-import ystyle::jsonrpc_stdio.StdioTransport
 import jsonvalue.*
 import std.sync.Mutex
 
@@ -100,6 +99,12 @@ public class PluginRuntime {
 
     /**
      * 以插件自身 stdio 为传输层启动（插件 main 的标准入口）
+     *
+     * 使用 LineStdioTransport + NewlineFraming（换行帧协议）：
+     * 仓颉 ConsoleReader.read(Array<Byte>) 在管道 stdin 下会永久阻塞，
+     * readln() 可靠，因此插件侧逐行读取（与 mcp-cj 生产方案一致）。
+     * 宿主侧 PipeTransport 必须使用 NewlineFraming 保持一致。
+     *
      * @param pluginId 插件唯一 ID
      * @param inject 依赖的服务 Key 列表
      * @param provide 提供的服务 Key 列表
@@ -107,8 +112,8 @@ public class PluginRuntime {
      */
     public static func run(pluginId: String, inject: Array<String>, provide: Array<String>,
                            handler: (PluginContext) -> Unit): Unit {
-        let transport = StdioTransport()
-        let server = JsonRpcServer(transport)
+        let transport = LineStdioTransport()
+        let server = JsonRpcServer(transport, framing: NewlineFraming())
         let runtime = PluginRuntime(server, pluginId)
         runtime.start(inject, provide, handler)
     }
@@ -118,7 +123,7 @@ public class PluginRuntime {
      */
     public static func run(transport: Transport, pluginId: String, inject: Array<String>,
                            provide: Array<String>, handler: (PluginContext) -> Unit): Unit {
-        let server = JsonRpcServer(transport)
+        let server = JsonRpcServer(transport, framing: NewlineFraming())
         let runtime = PluginRuntime(server, pluginId)
         runtime.start(inject, provide, handler)
     }

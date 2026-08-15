@@ -5,7 +5,7 @@ import std.deriving.*
 /**
  * 插件运行时状态（docs/design-impl.md §2.2）
  */
-@Derive[Equatable]
+@Derive[Equatable, ToString]
 public enum InstanceStatus {
     | Starting       // 已 launch，等待 initialize 握手
     | Active         // 握手完成，服务已注册

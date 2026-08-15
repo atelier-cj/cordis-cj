@@ -14,6 +14,10 @@
   license = ["MIT"]
   authors = ["ystyle"]
 
+[package.package-configuration."ystyle::cordis_plugin.examples.e2e"]
+  output-type = "executable"
+  compile-option = "--static"
+
 [dependencies]
   "ystyle::cordis_core" = { path = "../cordis_core" }
   "ystyle::jsonrpc" = { path = "../../json-rpc/jsonrpc" }

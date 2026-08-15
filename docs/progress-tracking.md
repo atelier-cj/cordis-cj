@@ -33,7 +33,7 @@
 - **`cordis_host/src/plugin_manager.cj`**：`PluginManager`——`launch`（三流 Pipe + 建连 + stderr 转发线程）、`terminate`（关连接 + 强杀 + wait 回收防僵尸）、`isExited`（client.isClosed 探测崩溃）、`forwardStderr`（StringReader 逐行转发）。
 - **测试**：新增 PipeTransport 5 用例（cat 回显/close/EOF/大消息 5000 字节）+ PluginManager 3 用例（生命周期/stderr 转发/进程退出探测），共 30 用例全通过（含真实子进程）。
 
-### P2 — cordis_plugin（提交中，分支 `feat/cordis-plugin`）
+### P2 — cordis_plugin（提交 `76f30ae`，分支 `feat/cordis-plugin`）
 
 - **`cordis_plugin/src/service_registry.cj`**：`ServiceRegistry`——服务注册/撤销（undo_id → disposer）+ 可逆效果列表（effect，卸载逆序执行）+ 服务处理器注册与 invoke 分发（`invokeHandler(service, method, args)`）。
 - **`cordis_plugin/src/plugin_runtime.cj`**：`PluginContext`（provide/dispose/registerHandler/effect/invoke/log）+ `PluginRuntime.run(pluginId, inject, provide, handler)`——握手（initialize 请求）→ 注册服务（provide 请求拿 undo_id）→ 业务 handler → 阻塞等连接关闭 → 逆序 disposeAll。宿主 → 插件处理器：initialized/dispose/notify/ping/invoke。
@@ -41,12 +41,21 @@
 - **测试**：`FakeHost`（模拟宿主）验证完整流程：握手 + 双服务 provide、invoke 转发（calc.add = 2+3 → 5）、dispose 撤销、ping 探活。共 34 用例全通过。
 - **关键**：插件侧用 `JsonRpcServer.start()`（后台 receiveLoop）+ `request()`（主动请求宿主），不能 start()+serve() 双 receiveLoop；阻塞等待用轮询 `server.isClosed()`。
 
+### P3 — Reconciler + 端到端（提交中，分支 `feat/cordis-reconciler`）
+
+- **`cordis_host/src/host_state.cj`**：`HostState`——desired/actual/serviceIndex/undoMap，服务注册/撤销/按提供者清理。
+- **`cordis_host/src/plugin_host.cj`**：`PluginHost`——宿主侧 RPC 处理器（initialize 依赖检查 + provide 分配 undo_id + log 收集）、`launchPlugin`、`reconcile`（读 TOML → diff → 拓扑排序 → 先加后删 → 崩溃自愈 `healCrashed`）、`removePlugin`（终止 + 清理服务注册表）。
+- **`cordis_plugin/src/line_stdio_transport.cj`**：`LineStdioTransport`——插件侧换行帧传输（readln 逐行 + 补回 \n）。
+- **`cordis_plugin/src/examples/e2e/main.cj`**：端到端测试插件（echo/add 两服务），静态编译为独立可执行。
+- **测试**：`EndToEndTest` 3 用例（真实宿主 + 真实插件进程）：完整生命周期（握手→服务注册→invoke 2+3=5→echo→热卸载清理）、配置调谐（TOML 拉起插件）、崩溃自愈（强杀后自动重启）。**共 37 用例全通过**。
+
 ## 关键决策记录
 
 1. **配置格式**：采用 tomlcj + `Serializable<T>` 统一接口，TOML/JSON 皆可（atelier 同款模式），不绑定具体格式。
 2. **宏后置 P4**：运行时库先行；宏可行性已由工作区项目实证（kux-cj @Crud 生成完整服务类、CJson @JsonSerializable 生成序列化代码、defer-cj 重写函数体、embed-cj 宏内执行宿主代码）。
 3. **序列化规范**：固定结构类实现 json.stream 接口；jsonvalue 仅用于无固定结构的动态字段（config/args）。
 4. **jsonrpc 依赖**：中心仓 jsonrpc 0.4.2 无配套 jsonrpc_stdio（0.4.1 未发布）→ 全部改用本地 path 依赖 `../../json-rpc/jsonrpc`（版本一致、stdio 可用）。
+5. **帧协议改为换行帧（重要修正）**：仓颉 `ConsoleReader.read(Array<Byte>)` 在管道 stdin（子进程被 launch 拉起的场景）下永久阻塞，无法用于 Content-Length 帧；`readln()` 可靠。→ 插件侧 `LineStdioTransport`（readln 逐行 + 补回 `\n`）+ `NewlineFraming`，宿主侧 PipeTransport 同步 `NewlineFraming`（与 mcp-cj 生产方案一致）。设计文档 §4 的 Content-Length 帧在此环境不可行，已修正。
 
 ## 工程要点（踩坑记录）
 
@@ -67,8 +76,12 @@
 - `JsonValue` 的 `[](key)` 返回 `?JsonValue`（Option），match 需 `case Some(JsonValue.String(k))`。
 - `JsonRpcClient.call("method")` 无参重载是非泛型的，不能带 `<T, R>` 类型参数。
 - 插件侧不能 `start()` + `serve()` 并用（双 receiveLoop 竞争读 transport）→ `start()` 后台接收 + 轮询 `isClosed()` 阻塞主线程。
+- **仓颉 ConsoleReader 管道 bug（P3 最大坑）**：子进程被 launch 拉起后，`getStdIn().read(Array<Byte>)` 永久阻塞，`readln()` 正常 → 插件侧必须用 readln 逐行 + 换行帧协议。
+- **双重去换行**：readln 已去掉行尾 `\n`，若再让 NewlineFraming 找 `\n` 永远解析不了 → LineStdioTransport.receive() 必须补回 `\n`。
+- 测试类 `@Expect(exists(Path(...)))` 等路径断言；`File` 无 delete()，用 `std.fs.remove(Path(p))`。
+- cjpm package-configuration 键：`"cordis_plugin.examples.e2e"`（无 organization 前缀），examples 目录需父包声明文件（examples.cj），子包目录名 = 包尾名（e2e 而非 e2e_plugin）。
 
 ## 待办 / 下一步
 
-- [ ] P3：Reconciler（TOML diff + 拓扑排序 + 先加后删 + 崩溃自愈）+ 端到端（宿主拉起真实插件进程）
-- [ ] P4：宏层 @plugin/@inject/@provide
+- [ ] P4：宏层 @plugin/@inject/@provide（参考 kux-cj @Crud、CJson @JsonSerializable）
+- [ ] 后续增强：initialize 依赖不满足时插件保持 Waiting 重试（当前直接拒绝）；事件总线（emit/waterfall）；配置热更新监听

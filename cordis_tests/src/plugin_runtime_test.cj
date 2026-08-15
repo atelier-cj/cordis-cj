@@ -52,7 +52,7 @@ class PluginRuntimeTest {
 
     private static func setupHost(): (FakeHost, MemoryDuplexTransport) {
         let (hostT, pluginT) = MemoryDuplexTransport.pair()
-        let client = JsonRpcClient(hostT)
+        let client = JsonRpcClient(hostT, framing: NewlineFraming())
         let host = FakeHost(client)
 
         // 宿主处理 initialize：校验并返回 ok + providers

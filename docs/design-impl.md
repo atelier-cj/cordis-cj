@@ -26,7 +26,7 @@
 
 ### 0.2 RPC 框架：`ystyle::jsonrpc`（本地已有，直接复用）
 
-- 帧协议：`ContentLengthFraming` 即 `Content-Length: N\r\n\r\n{...}`，与 v1.0 设计完全一致，**无需自研**。
+- 帧协议：**采用 `NewlineFraming`（换行分隔帧）**。v1.0/初稿设想的 `ContentLengthFraming`（`Content-Length: N\r\n\r\n{...}`）在仓颉环境不可行：子进程被 `launch` 拉起后，`ConsoleReader.read(Array<Byte>)` 永久阻塞，无法精确读取帧体；`readln()` 可靠。因此插件侧用 `LineStdioTransport`（readln 逐行 + 补回 `\n`）+ `NewlineFraming`，宿主侧 PipeTransport 同步 `NewlineFraming`（与 mcp-cj 生产方案一致）。
 - `Transport` 接口（宿主侧需为子进程管道新实现一个，见 §3.2）：
 
 ```cangjie
@@ -37,7 +37,7 @@ public interface Transport <: Resource {
 }
 ```
 
-- 宿主侧（每插件一个连接）：`JsonRpcClient(transport, framing!: Framing = ContentLengthFraming())`
+- 宿主侧（每插件一个连接）：`JsonRpcClient(transport, framing!: Framing = NewlineFraming())`
 
 | 方法 | 签名 | 用途 |
 | :--- | :--- | :--- |
@@ -47,7 +47,7 @@ public interface Transport <: Resource {
 | 收插件通知 | `setNotificationCallback(cb: NotificationCallback): Unit`，`NotificationCallback = (Notification) -> Unit` | 处理 log |
 | 生命周期 | `start()` / `close()` / `isClosed()` | 后台线程收发；stdout EOF 自动关闭 |
 
-- 插件侧：`JsonRpcServer(transport, framing!: Framing = ContentLengthFraming())`
+- 插件侧：`JsonRpcServer(transport, framing!: Framing = NewlineFraming())`
 
 | 方法 | 签名 | 用途 |
 | :--- | :--- | :--- |
@@ -319,7 +319,7 @@ public class PluginManager {
 }
 ```
 
-## 4. 协议定义（JSON-RPC 2.0，Content-Length 帧）
+## 4. 协议定义（JSON-RPC 2.0，换行分隔帧）
 
 所有消息类实现 `JsonSerializable` / `JsonDeserializable<T>`（`stdx.encoding.json.stream`）。方法名常量：
 
@@ -462,7 +462,7 @@ public class PluginRuntime {
     // 插件 main 调用：启动握手 + 事件循环，阻塞直到宿主关闭
     public static func run(pluginId: String, inject: Array<String>, provide: Array<String>): Unit {
         let transport = StdioTransport()          // 插件自身 stdin/stdout
-        let server = JsonRpcServer(transport)     // ContentLengthFraming 默认
+        let server = JsonRpcServer(transport)     // NewlineFraming（换行帧）
         // 1) 握手：向宿主发 initialize 请求
         let result = server.request<InitializeParams, InitializeResult>("initialize",
             params: InitializeParams(pluginId, inject, provide))
