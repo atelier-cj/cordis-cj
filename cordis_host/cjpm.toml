@@ -15,7 +15,7 @@
   authors = ["ystyle"]
 
 [dependencies]
-  "ystyle::cordis_core" = { path = "../cordis_core" }
+  "ystyle::cordis_core" = "0.1.0"
   "ystyle::jsonrpc" = { path = "../../json-rpc/jsonrpc" }
   "jsonvalue" = "1.1.0"
 

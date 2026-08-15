@@ -15,7 +15,7 @@
   authors = ["ystyle"]
 
 [dependencies]
-  "ystyle::cordis_plugin" = { path = "../cordis_plugin" }
+  "ystyle::cordis_plugin" = "0.1.0"
   "jsonvalue" = "1.1.0"
 
 [target.x86_64-unknown-linux-gnu.bin-dependencies]

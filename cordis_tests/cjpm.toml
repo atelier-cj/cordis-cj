@@ -15,9 +15,9 @@
   authors = ["ystyle"]
 
 [dependencies]
-  "ystyle::cordis_core" = { path = "../cordis_core" }
-  "ystyle::cordis_host" = { path = "../cordis_host" }
-  "ystyle::cordis_plugin" = { path = "../cordis_plugin" }
+  "ystyle::cordis_core" = "0.1.0"
+  "ystyle::cordis_host" = "0.1.0"
+  "ystyle::cordis_plugin" = "0.1.0"
   "ystyle::jsonrpc" = { path = "../../json-rpc/jsonrpc" }
   "jsonvalue" = "1.1.0"
 
