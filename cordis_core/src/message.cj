@@ -230,20 +230,26 @@ public class NotifyParams <: JsonSerializable & JsonDeserializable<NotifyParams>
 
 /**
  * log.params（插件 → 宿主，通知）
+ * @param logger 命名日志器名称（ctx.logger(name) 时携带，None = 默认 ctx.log）
  */
 public class LogParams <: JsonSerializable & JsonDeserializable<LogParams> {
     public let level: String   // LogLevel.TRACE|DEBUG|INFO|WARN|ERROR
     public let message: String
+    public let logger: ?String
 
-    public init(level: String, message: String) {
+    public init(level: String, message: String, logger!: ?String = None) {
         this.level = level
         this.message = message
+        this.logger = logger
     }
 
     public func toJson(w: JsonWriter): Unit {
         w.startObject()
         w.writeName("level").writeValue(this.level)
         w.writeName("message").writeValue(this.message)
+        if (let Some(l) <- this.logger) {
+            w.writeName("logger").writeValue(l)
+        }
         w.endObject()
     }
 
@@ -251,15 +257,17 @@ public class LogParams <: JsonSerializable & JsonDeserializable<LogParams> {
         r.startObject()
         var level: ?String = None
         var message: ?String = None
+        var logger: ?String = None
         while (r.peek() != EndObject) {
             match (r.readName()) {
                 case "level" => level = r.readValue<String>()
                 case "message" => message = r.readValue<String>()
+                case "logger" => logger = r.readValue<String>()
                 case _ => r.skip()
             }
         }
         r.endObject()
-        LogParams(level.getOrThrow(), message.getOrThrow())
+        LogParams(level.getOrThrow(), message.getOrThrow(), logger: logger)
     }
 }
 

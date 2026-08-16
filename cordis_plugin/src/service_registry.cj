@@ -18,8 +18,8 @@ public class ServiceRegistry {
     // undo_id -> 撤销回调（disposer），按注册顺序维护
     private let services: HashMap<String, () -> Unit> = HashMap<String, () -> Unit>()
     private let serviceOrder: ArrayList<String> = ArrayList<String>()
-    // 可逆效果 disposer（无 undo_id），按注册顺序维护
-    private let effects: ArrayList<() -> Unit> = ArrayList<() -> Unit>()
+    // 可逆效果 disposer（无 undo_id），按注册顺序维护：label -> disposer
+    private let effects: ArrayList<(String, () -> Unit)> = ArrayList<(String, () -> Unit)>()
     // 服务 Key -> invoke 处理器（宿主转发服务调用时分发）
     private let handlers: HashMap<String, (String, Array<JsonValue>) -> JsonValue> = HashMap<String, (String, Array<JsonValue>) -> JsonValue>()
     private let lock: Mutex = Mutex()
@@ -131,8 +131,17 @@ public class ServiceRegistry {
      * 注册可逆效果：返回 disposer，插件卸载时逆序执行（对应 Cordis ctx.effect）
      */
     public func effect(disposer: () -> Unit): Unit {
+        this.effect(disposer, "anonymous")
+    }
+
+    /**
+     * 注册可逆效果（带 label，docs/cordis-comparison.md §4 getEffects 诊断树）
+     * @param disposer 撤销回调
+     * @param label 效果标签（getEffects() 诊断展示）
+     */
+    public func effect(disposer: () -> Unit, label: String): Unit {
         synchronized(this.lock) {
-            this.effects.add(disposer)
+            this.effects.add((label, disposer))
         }
     }
 
@@ -159,6 +168,20 @@ public class ServiceRegistry {
     }
 
     /**
+     * 效果诊断树（docs/cordis-comparison.md §4，对齐 Cordis Fiber.getEffects）：
+     * 返回当前已注册效果的 label 列表（按注册顺序）
+     */
+    public func getEffects(): ArrayList<String> {
+        synchronized(this.lock) {
+            let result = ArrayList<String>()
+            for ((label, _) in this.effects) {
+                result.add(label)
+            }
+            result
+        }
+    }
+
+    /**
      * 卸载全部：逆序执行所有 disposer（效果 + 服务），然后清空
      * 对应 Cordis 卸载时逆序撤销效果（docs/design-impl.md §8）
      */
@@ -168,7 +191,7 @@ public class ServiceRegistry {
         synchronized(this.lock) {
             // 逆序复制 effects
             for (i in this.effects.size - 1..0) {
-                reversedEffects.add(this.effects[i])
+                reversedEffects.add(this.effects[i][1])
             }
             // 逆序复制 services
             for (i in this.serviceOrder.size - 1..0) {
