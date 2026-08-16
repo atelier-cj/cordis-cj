@@ -5,6 +5,7 @@ import ystyle::jsonrpc.*
 import jsonvalue.*
 import std.collection.{HashMap, ArrayList, HashSet}
 import std.sync.Mutex
+import std.time.MonoTime
 
 /**
  * 宿主协调器（docs/design-impl.md §5、§6.2）
@@ -28,6 +29,10 @@ public class PluginHost {
     private let lock: Mutex = Mutex()
     // Config schema 注册表：pluginId -> ConfigSchema（docs/cordis-comparison.md §4）
     private let schemas: HashMap<String, ConfigSchema> = HashMap<String, ConfigSchema>()
+    // 状态转换监听器（Fiber 状态机：对齐 Cordis internal/status 事件）
+    // 签名：(pluginId, oldStatus, newStatus)
+    private let statusListeners: ArrayList<(String, InstanceStatus, InstanceStatus) -> Unit> =
+        ArrayList<(String, InstanceStatus, InstanceStatus) -> Unit>()
 
     public init(manager: PluginManager, logger: (String, String) -> Unit) {
         this.manager = manager
@@ -105,9 +110,7 @@ public class PluginHost {
                         // 检查依赖是否全部就绪
                         let missing = this.checkMissing(params.inject)
                         if (missing.size == 0) {
-                            synchronized(this.lock) {
-                                instance.status = InstanceStatus.Active
-                            }
+                            this.transitionStatus(instance, InstanceStatus.Active)
                             let providers = this.snapshotProviders(params.inject)
                             // 下发插件私有配置（entry.config DataModel → JsonValue）
                             let cfg = JsonValue.fromDataModel(instance.entry.config)
@@ -115,9 +118,7 @@ public class PluginHost {
                                 config: Some(cfg))))
                         } else {
                             // 依赖未满足：保持 Pending 等待重试（插件侧会周期重发 initialize）
-                            synchronized(this.lock) {
-                                instance.status = InstanceStatus.Pending
-                            }
+                            this.transitionStatus(instance, InstanceStatus.Pending)
                             this.logger(providerId, "initialize pending: missing deps ${missing}")
                             Some(JsonValue.fromObject(InitializeResult(false, HashMap<String, String>())))
                         }
@@ -302,6 +303,209 @@ public class PluginHost {
         }
     }
 
+    // ── Fiber 状态机（docs/cordis-comparison.md §4，对齐 Cordis Fiber）────────
+
+    /**
+     * 注册状态转换监听器（对齐 Cordis internal/status 事件）
+     * @param listener (pluginId, oldStatus, newStatus) 每次状态转换时调用
+     */
+    public func onStatusChange(listener: (String, InstanceStatus, InstanceStatus) -> Unit): Unit {
+        synchronized(this.lock) {
+            this.statusListeners.add(listener)
+        }
+    }
+
+    /**
+     * 状态转换统一入口：更新状态 + 唤醒 awaitActive 等待者 + 通知监听器
+     *
+     * 对齐 Cordis Fiber._updateState（状态转换 emit internal/status）。
+     * 所有状态变更必须经此方法（initialize 握手 / terminate / 崩溃标记）。
+     *
+     * @param instance 目标实例
+     * @param newStatus 新状态
+     * @param error 状态相关错误（Failed 时记录，await 重抛）
+     */
+    private func transitionStatus(instance: PluginInstance, newStatus: InstanceStatus,
+                                  error!: ?String = None): Unit {
+        let old = synchronized(instance.settleLock) {
+            let oldStatus = instance.status
+            if (oldStatus != newStatus) {
+                instance.status = newStatus
+            }
+            if (let Some(err) <- error) {
+                instance.error = Some(err)
+            }
+            instance.settleCond.notifyAll()
+            oldStatus
+        }
+        if (old != newStatus) {
+            let listeners = synchronized(this.lock) {
+                ArrayList<(String, InstanceStatus, InstanceStatus) -> Unit>(this.statusListeners)
+            }
+            for (listener in listeners) {
+                try {
+                    listener(instance.entry.id, old, newStatus)
+                } catch (e: Exception) {
+                    this.logger(instance.entry.id, "status listener error: ${e.message}")
+                }
+            }
+            this.logger(instance.entry.id, "status ${old} -> ${newStatus}")
+        }
+    }
+
+    /**
+     * 等待插件进入 Active 状态（对齐 Cordis Fiber.await()）
+     *
+     * 阻塞直到实例 Active **且其 provide 的服务全部注册**（Active 是握手完成，
+     * 服务注册在其后；对齐 Cordis ACTIVE = 插件回调执行完、服务可用）。
+     * 进程死亡/启动失败 → Err(错误原因)；超时 → Err("timeout")。
+     * Pending（依赖未满足）继续等待（依赖就绪后自动 Active）。
+     *
+     * @param id 插件 id
+     * @param timeout 最长等待时间
+     * @return Ok(实例) 已 Active 且服务就绪；Err 失败原因/超时/实例不存在
+     */
+    public func awaitActive(id: String, timeout!: Duration = 10 * Duration.second): Result<PluginInstance> {
+        let deadline = MonoTime.now() + timeout
+        while (true) {
+            let instance = this.state.getInstance(id)
+            match (instance) {
+                case None =>
+                    return Err("plugin '${id}' not found")
+                case Some(inst) =>
+                    let status = synchronized(inst.settleLock) {
+                        inst.status
+                    }
+                    if (status == InstanceStatus.Active) {
+                        // Active 是握手完成；等服务注册（provide 在握手之后）
+                        if (this.allServicesRegistered(inst)) {
+                            return Ok(inst)
+                        }
+                        // 服务未齐 → 短暂等待后重查（不计入 notify，轮询兜底）
+                        sleep(10 * Duration.millisecond)
+                    } else if (status == InstanceStatus.Failed || status == InstanceStatus.Unreachable) {
+                        let reason = synchronized(inst.settleLock) {
+                            inst.error
+                        }
+                        return Err(match (reason) { case Some(r) => r; case None => "plugin '${id}' ${status}" })
+                    } else if (status == InstanceStatus.Unloading) {
+                        // 卸载中 → 等待其完成（重启流程内会替换实例）
+                        return Err("plugin '${id}' is unloading")
+                    } else {
+                        // Starting / Pending：进程已死 → 标记 Failed（对齐 Cordis await 重抛错误）
+                        if (this.manager.isExited(inst)) {
+                            this.transitionStatus(inst, InstanceStatus.Failed,
+                                error: Some("process exited during startup"))
+                            continue
+                        }
+                        // 等待状态变化
+                        let remaining = deadline - MonoTime.now()
+                        if (remaining <= Duration.Zero) {
+                            return Err("timeout waiting for plugin '${id}' active (status ${status})")
+                        }
+                        synchronized(inst.settleLock) {
+                            // 条件变量带超时等待；被 notifyAll 唤醒后重新检查状态
+                            inst.settleCond.wait(timeout: remaining)
+                        }
+                    }
+            }
+        }
+        // while(true) 内所有路径均 return；此处仅为类型完整
+        Err("unreachable")
+    }
+
+    /**
+     * 检查实例的 provide 服务是否全部注册（awaitActive 用）
+     */
+    private func allServicesRegistered(inst: PluginInstance): Bool {
+        if (inst.entry.provide.size == 0) {
+            return true
+        }
+        synchronized(this.state.lock) {
+            for (key in inst.entry.provide) {
+                if (this.state.serviceIndex.get(key) != Some(inst.entry.id)) {
+                    return false
+                }
+            }
+            true
+        }
+    }
+
+    /**
+     * 重启插件（对齐 Cordis Fiber.restart()）
+     *
+     * 终止当前进程 → 用当前 desired entry（无 desired 时用 instance.entry）
+     * 重新拉起 → 等待 Active。
+     *
+     * @param id 插件 id
+     * @return Ok(新实例)；Err 实例不存在/重启失败
+     */
+    public func restartPlugin(id: String): Result<PluginInstance> {
+        let instance = this.state.getInstance(id)
+        match (instance) {
+            case None => Err("plugin '${id}' not found")
+            case Some(inst) =>
+                let entry = synchronized(this.state.lock) {
+                    if (this.state.desired.contains(id)) {
+                        this.state.desired[id]
+                    } else {
+                        inst.entry
+                    }
+                }
+                this.removePlugin(id)
+                try {
+                    let fresh = this.launchPlugin(entry)
+                    match (this.awaitActive(id, timeout: 10 * Duration.second)) {
+                        case Ok(a) => Ok(a)
+                        case Err(e) =>
+                            // 重启后未能 Active：记录失败
+                            this.transitionStatus(fresh, InstanceStatus.Failed, error: Some(e))
+                            Err("restart '${id}' failed: ${e}")
+                    }
+                } catch (e: Exception) {
+                    Err("restart '${id}' failed: ${e.message}")
+                }
+        }
+    }
+
+    /**
+     * 更新插件配置并重启（对齐 Cordis Fiber.update(config)）
+     *
+     * 1. 校验新配置（Config schema，失败 → Err 且不重启）
+     * 2. 更新 desired 与实例 entry
+     * 3. 重启 → 等待 Active
+     *
+     * @param id 插件 id
+     * @param newEntry 新配置条目（id 必须匹配）
+     * @return Ok(新实例)；Err 校验失败/实例不存在/重启失败
+     */
+    public func updatePlugin(id: String, newEntry: PluginEntry): Result<PluginInstance> {
+        if (newEntry.id != id) {
+            return Err("update '${id}': entry id mismatch '${newEntry.id}'")
+        }
+        let instance = this.state.getInstance(id)
+        match (instance) {
+            case None => Err("plugin '${id}' not found")
+            case Some(inst) =>
+                // 1. config schema 校验（对齐 Cordis update 的 resolveConfig）
+                match (this.validateConfig(newEntry, "plugins[${id}].config")) {
+                    case Some(err) => Err("update '${id}': config validation failed: ${err}")
+                    case None =>
+                        // 2. 更新 desired（若存在）与实例 entry
+                        synchronized(this.state.lock) {
+                            if (this.state.desired.contains(id)) {
+                                this.state.desired[id] = newEntry
+                            }
+                        }
+                        synchronized(inst.settleLock) {
+                            inst.entry = newEntry
+                        }
+                        // 3. 重启 → 等待 Active
+                        this.restartPlugin(id)
+                }
+        }
+    }
+
     /**
      * 检查依赖：返回缺失的服务 Key 列表
      */
@@ -377,12 +581,10 @@ public class PluginHost {
             this.removePlugin(id)
         }
         for (entry in toUpdate) {
-            this.removePlugin(entry.id)
-            try {
-                this.launchPlugin(entry)
-                this.logger(entry.id, "updated")
-            } catch (e: Exception) {
-                this.logger(entry.id, "update launch failed: ${e.message}")
+            // 配置更新走 Fiber 状态机 updatePlugin（校验 + 重启 + 等待 Active）
+            match (this.updatePlugin(entry.id, entry)) {
+                case Ok(inst) => this.logger(entry.id, "updated")
+                case Err(e) => this.logger(entry.id, "update failed: ${e}")
             }
         }
 
@@ -445,6 +647,8 @@ public class PluginHost {
         match (instance) {
             case Some(inst) =>
                 this.logger(id, "removing")
+                // 状态 → Unloading（Fiber 状态机统一转换）
+                this.transitionStatus(inst, InstanceStatus.Unloading)
                 this.eventRegistry.unsubscribeAll(id)   // 清理事件订阅（docs/design-events.md §8）
                 // 依赖变更通知：先收集被移除的服务 Key，通知依赖者（DEPENDENCY_LOST）
                 let removedKeys = this.state.servicesOf(id)
@@ -489,7 +693,7 @@ public class PluginHost {
     }
 
     /**
-     * 崩溃自愈：desired 存在但实际进程已退出 → 重新拉起
+     * 崩溃自愈：desired 存在但实际进程已退出 → 标记 Failed 后重新拉起
      */
     private func healCrashed(): Unit {
         let crashed = ArrayList<String>()
@@ -505,6 +709,13 @@ public class PluginHost {
             match (entry) {
                 case Some(e) =>
                     this.logger(id, "crashed, restarting")
+                    // 先标记 Failed（Fiber 状态机：awaitActive/监听器可感知崩溃）
+                    match (this.state.getInstance(id)) {
+                        case Some(inst) =>
+                            this.transitionStatus(inst, InstanceStatus.Failed,
+                                error: Some("process exited unexpectedly"))
+                        case None => ()
+                    }
                     this.state.removeInstance(id)
                     this.state.clearServicesByProvider(id)
                     try {

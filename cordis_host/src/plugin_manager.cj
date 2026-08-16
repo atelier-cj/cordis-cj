@@ -80,22 +80,29 @@ public class PluginManager {
 
     /**
      * 热卸载：关闭 RPC 连接 → 强杀进程 → 回收退出码
+     *
+     * 幂等：已处于 Unloading 的实例直接返回（防重复 terminate）。
+     * 注意：调用方（PluginHost.removePlugin）已先 transitionStatus(Unloading)，
+     * 因此这里不能仅凭状态判断——用独立标志位防止重复执行。
+     *
      * @return 子进程退出码（正常退出为退出码，被信号杀死为信号编号）
      */
     public func terminate(instance: PluginInstance): Int64 {
-        synchronized(this.lock) {
-            if (instance.status == InstanceStatus.Unloading) {
-                return 0
-            }
-            instance.status = InstanceStatus.Unloading
+        if (!instance.terminateLock.tryLock()) {
+            return 0   // 已有 terminate 在进行
         }
         try {
-            instance.client.close()
-        } catch (e: Exception) {
-            ()
+            instance.transitionTo(InstanceStatus.Unloading)
+            try {
+                instance.client.close()
+            } catch (e: Exception) {
+                ()
+            }
+            instance.process.terminate(force: true)
+            instance.process.wait()
+        } finally {
+            instance.terminateLock.unlock()
         }
-        instance.process.terminate(force: true)
-        instance.process.wait()
     }
 
     /**

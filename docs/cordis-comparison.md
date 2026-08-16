@@ -50,13 +50,13 @@
 | 4c | 事件 `waterfall` 洋葱 next | next 回调推进链 + veto 短路 | ✅ events/next 跨进程远程回调（§4 P13） | 🔴→✅ 已实现 |
 | 5 | Service 基类（类即服务） | 134 个服务子类 | ✅ Service 基类（provide/register/bind/check） | 🟡→✅ 已实现 |
 | 6 | Config schema 校验 | standard-schema + ValidationError（含路径） | ✅ ConfigSchema（白名单/类型/必填 + 路径化） | 🟡→✅ 已实现 |
-| 7 | Fiber 状态机 | 6 态 + await/restart/update | Starting/Active/Unloading/Failed + 崩溃自愈 | 🟡 |
+| 7 | Fiber 状态机 | 6 态 + await/restart/update | ✅ awaitActive/restartPlugin/updatePlugin + transitionStatus/onStatusChange（P14） | 🔴→✅ 已实现 |
 | 8 | 配置热更新 | loader `internal/update` + 持久化回写 | ✅ 配置传递 + reconcile 检测 config 变更重启 | 🟡→✅ 已实现 |
 | 9 | 服务隔离 `isolate` | 同名服务多实现按作用域分隔 | 无 | 🟢 |
 | 10 | 服务拦截 `intercept` | 服务级配置合并 | 无 | 🟢 |
 | 11 | `accessor` / `mixin` | ctx 属性动态扩展 | 无 | 🟢 |
 | 12 | effect 诊断树 `getEffects()` | 效果元数据树 | ✅ effect(label) + getEffects() | 🟢→✅ 已实现 |
-| 13 | async / generator effect | 完整 | 仅同步 disposer | 🟢 |
+| 13 | async / generator effect | 完整 | ✅ effectAsync（disposer 返回 Future，disposeAll 等待完成） | 🟢→✅ 已实现 |
 | 13b | timer / 命名 Logger | ctx.timeout/interval + logger(name) | ✅ 全部实现 | ✅ 已实现 |
 | 14 | 嵌套插件组 `group` | 支持 | 无 | 🟢 |
 | 15 | 配置 include / 继承 | 支持 | 无 | 🟢 |
@@ -102,7 +102,7 @@
 5. ✅ **Config schema 校验**：`cordis_core/src/config_schema.cj`——`ConfigFieldSpec`（name/typeName/required）+ `ConfigSchema`（`validate` 宽松 / `validateStrict` 含未知字段检查），类型含 string/bool/int/float/array/object；错误带完整路径（如 `plugins[0].config.port: expected int, got string`）；`PluginHost.registerSchema(pluginId, schema)` + `launchPlugin` 前置校验（失败抛路径化异常）
 6. ✅ **配置热更新 + 配置传递**：`InitializeResult.config` 宿主下发 `entry.config`（DataModel→JsonValue），插件侧 `PluginContext.config`（toDataModel 转回）；reconcile 的 `entryChanged` 检测 config 变更 → 重启插件 → 新配置生效（e2e：offset 10→100，add 结果 15→105）
 
-### 第三阶段：增强（✅ 已完成，P11/P12/P13）
+### 第三阶段：增强（✅ 已完成，P11/P12/P13/P14）
 
 7. **`isolate` 服务隔离**：⚪ 不做——进程隔离天然满足（每个插件即独立进程/实例，同名服务多实例即多插件），跨进程作用域隔离意义有限
 8. **`intercept` 服务级配置**：⚪ 不做——entry.config 已透传给插件（P10 配置传递），跨进程拦截语义弱
@@ -114,6 +114,7 @@
 14. ✅ **发布侧类型安全 `emit<T>`（P12）**：`ctx.emit<T>/parallel<T>/serial<T>/bail<T>/waterfall<T>`（`T <: JsonSerializable`，参数自动序列化，与订阅侧 `on<T>` 配套）
 15. ✅ **async effect（P12）**：`ctx.effectAsync(disposer)`（disposer 返回 `Future<Unit>`，disposeAll 逆序执行并 `fut.get()` 等待完成）
 16. ✅ **完整 waterfall next 洋葱回调（P13）**：`ctx.onWaterfall(event, (args, next) -> ?JsonValue)`（+ 泛型 `onWaterfall<T>`）——订阅者收到 next 回调，调 `next()` 推进链（最终内置行为），不调直接返回 = veto 短路；跨进程经 `events/next` 远程回调实现（宿主按 emitId 存链状态 + `DispatchParams.nextAllowed`），与 Cordis `waterfall` 语义一致（最外层订阅者返回值 = 链结果，见 design-events.md §7.1）
+17. ✅ **Fiber 状态机（P14）**：`PluginHost.awaitActive/restartPlugin/updatePlugin` + `transitionStatus` 统一状态转换入口 + `onStatusChange` 监听（对齐 Cordis `await()/restart()/update()` 与 `internal/status` 事件）——awaitActive 等待 Active 且服务注册完成（重抛启动错误）；restartPlugin 终止重拉；updatePlugin schema 校验后重启；reconcile 热更新复用 updatePlugin；崩溃自愈先标 Failed。详见 design-impl.md §2.2 与 FiberStateTest
 
 ### 明确不做
 

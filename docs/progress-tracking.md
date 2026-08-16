@@ -4,7 +4,7 @@
 > 设计文档：`docs/design.md`（v1.0 草案）、`docs/design-impl.md`（v2.0 实现级）
 > 仓库：https://atomgit.com/ystyle/cordis-cj.git（MIT）
 
-## 总体计划（P0–P13）
+## 总体计划（P0–P14）
 
 | 阶段 | 内容 | 状态 |
 | :--- | :--- | :--- |
@@ -22,6 +22,7 @@
 | P11 | 第三阶段增强：命名 Logger + timer + effect 诊断树 + on<T> 类型安全 | ✅ 完成 |
 | P12 | 类型安全发布 emit<T>/serial<T>/... + async effect（effectAsync） | ✅ 完成 |
 | P13 | 完整 waterfall next 洋葱回调（events/next 跨进程远程回调协议） | ✅ 完成 |
+| P14 | Fiber 状态机：awaitActive/restartPlugin/updatePlugin + transitionStatus/onStatusChange | ✅ 完成 |
 | — | 收尾：合并 master、README、LICENSE、remote、workspace 依赖简化 | ✅ 完成 |
 
 ## 已完成
@@ -293,8 +294,39 @@
   - `PluginEventTest.testOnWaterfallNextRoundTrip`（插件侧 onWaterfall → listener 调 next() → 宿主 events/next 响应 → 结果回宿主）
 - **设计要点**：跨连接无死锁——每次 `callSubscriber` 阻塞"发起方"连接线程，响应由"目标订阅者"连接线程处理；插件侧 `registerAsync` + spawn 保证接收线程不被 listener 阻塞。详见 `docs/design-events.md §7.1`。
 
+### P14 — Fiber 状态机：await/restart/update（分支 `feat/fiber-state-machine`）
+
+对齐 Cordis Fiber（fiber.ts）的 `await()/restart()/update()` 语义与 `internal/status` 事件：
+
+1. **状态转换统一入口 `transitionStatus(instance, newStatus, error?)`**（PluginHost 私有）：
+   - 更新状态 + 唤醒 awaitActive 等待者（settleCond.notifyAll）+ 通知 `onStatusChange` 监听器（对齐 Cordis `_updateState` 的 `internal/status` 事件）。
+   - initialize 握手（Active/Pending）、removePlugin（Unloading）、崩溃自愈（Failed）全部改走此入口。
+2. **`PluginHost.awaitActive(id, timeout): Result<PluginInstance>`**（对齐 Cordis `await()`）：
+   - 阻塞等待插件 Active **且其 provide 服务全部注册**（Active 是握手完成，服务注册在其后——invoke 前必须可用）。
+   - 进程死亡/启动失败 → 标记 Failed 并返回错误（对齐 Cordis await 重抛启动错误 `_error`）；Pending（依赖缺失）继续等待（依赖就绪自动 Active）；超时 Err。
+   - 条件变量等待 + 总超时（MonoTime 截止线），非轮询。
+3. **`PluginHost.restartPlugin(id)`**（对齐 Cordis `restart()`）：
+   - 终止当前进程 → 用当前 desired entry（无 desired 时用 instance.entry）重新拉起 → awaitActive。
+   - 实例不存在 → Err（对齐 Cordis assertActive 已 dispose）。
+4. **`PluginHost.updatePlugin(id, newEntry)`**（对齐 Cordis `update(config)`）：
+   - Config schema 校验（失败 Err 且不重启，对齐 Cordis resolveConfig 抛 ValidationError）→ 更新 desired/实例 entry → restart → awaitActive。
+   - reconcile 的配置热更新（computeToUpdate）复用此路径。
+5. **`PluginHost.onStatusChange(listener)`**：注册状态转换监听（(pluginId, old, new)），宿主应用可感知生命周期（对齐 Cordis `internal/status`）。
+6. **PluginInstance 增强**：settleLock/settleCond（状态同步）、terminateLock（终止幂等：防并发重复杀进程）、error（Failed 原因）。
+7. **修复**：PluginManager.terminate 幂等判断改为 terminateLock.tryLock（原"状态已 Unloading 即跳过"在 removePlugin 预置状态后会导致进程泄漏）。
+
+**测试**（新增 `FiberStateTest` 8 用例，全量 119 通过）：
+- `testAwaitActiveWaitsForHandshake`（launch 后 awaitActive 等到 Active + 服务注册，替代轮询 sleep）
+- `testAwaitActiveTimeout`（/bin/sleep 永不握手 → 超时 Err）
+- `testAwaitActiveFailedWhenProcessDies`（/bin/false 启动即死 → Failed + Err）
+- `testRestartPluginKeepsEntry`（重启后新实例 Active + 服务可用 + invoke 5.0）
+- `testRestartPluginNotFound`（实例不存在 → Err）
+- `testUpdatePluginConfigRestarts`（offset 0→100 重启后 add(2,3)=105）
+- `testUpdatePluginInvalidConfigRejected`（schema 校验失败 → Err 且 pid 不变不重启）
+- `testStatusListenersReceiveTransitions`（onStatusChange 收到 Starting→Active）
+- 踩坑：InstanceStatus 的 ToString 输出带限定名 `InstanceStatus.Active`（断言 contains 用全名）；`while(true)` 表达式是 Unit，需尾部兜底 return。
+
 ## 待办 / 下一步
 
-- [ ] Fiber 状态机完善：`await()/restart()/update()` 语义（当前崩溃自愈 + 配置热更新重启已覆盖主路径）
 - [ ] 发布流程（cangjie-publish）：注意宏库带 organization 跨模块消费缺陷——若对外发布宏，评估去 org 或实测中心仓拉取路径
-- [ ] cordis-cj 发版 0.2.0（P8 UDS + P9 语义核心 + P10 服务系统 + P11 增强 + P12/P13）（中心仓 gjson 1.2.1 同步问题待恢复后继续）
+- [ ] cordis-cj 发版 0.2.0（P8 UDS + P9 语义核心 + P10 服务系统 + P11 增强 + P12/P13/P14）（中心仓 gjson 1.2.1 同步问题待恢复后继续）
