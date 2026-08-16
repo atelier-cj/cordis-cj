@@ -46,6 +46,7 @@
 | 2 | 依赖变更自动通知重载 | `reflect.notify()` → 依赖者 fiber 重载 | ✅ PROVIDER_CHANGED/DEPENDENCY_LOST 通知 | 🔴→✅ 已实现 |
 | 3 | 事件派发模式 | emit / parallel / serial / bail / waterfall | ✅ 全部（含 once/prepend） | 🔴→✅ 已实现 |
 | 4 | 事件 `once` / prepend / global / 过滤 | 完整 | 🟡 once/prepend 已实现；global/过滤未做 | 🟡 |
+| 4b | 事件 `on<T>` 类型安全 | TS 泛型 | ✅ on<T>/once<T>/onVal<T> | ✅ 已实现 |
 | 5 | Service 基类（类即服务） | 134 个服务子类 | ✅ Service 基类（provide/register/bind/check） | 🟡→✅ 已实现 |
 | 6 | Config schema 校验 | standard-schema + ValidationError（含路径） | ✅ ConfigSchema（白名单/类型/必填 + 路径化） | 🟡→✅ 已实现 |
 | 7 | Fiber 状态机 | 6 态 + await/restart/update | Starting/Active/Unloading/Failed + 崩溃自愈 | 🟡 |
@@ -53,8 +54,9 @@
 | 9 | 服务隔离 `isolate` | 同名服务多实现按作用域分隔 | 无 | 🟢 |
 | 10 | 服务拦截 `intercept` | 服务级配置合并 | 无 | 🟢 |
 | 11 | `accessor` / `mixin` | ctx 属性动态扩展 | 无 | 🟢 |
-| 12 | effect 诊断树 `getEffects()` | 效果元数据树 | 无（仅 disposer 列表） | 🟢 |
+| 12 | effect 诊断树 `getEffects()` | 效果元数据树 | ✅ effect(label) + getEffects() | 🟢→✅ 已实现 |
 | 13 | async / generator effect | 完整 | 仅同步 disposer | 🟢 |
+| 13b | timer / 命名 Logger | ctx.timeout/interval + logger(name) | ✅ 全部实现 | ✅ 已实现 |
 | 14 | 嵌套插件组 `group` | 支持 | 无 | 🟢 |
 | 15 | 配置 include / 继承 | 支持 | 无 | 🟢 |
 | 16 | timer 服务 | timeout/interval/throttle/debounce | 无 | 🟢 |
@@ -99,13 +101,15 @@
 5. ✅ **Config schema 校验**：`cordis_core/src/config_schema.cj`——`ConfigFieldSpec`（name/typeName/required）+ `ConfigSchema`（`validate` 宽松 / `validateStrict` 含未知字段检查），类型含 string/bool/int/float/array/object；错误带完整路径（如 `plugins[0].config.port: expected int, got string`）；`PluginHost.registerSchema(pluginId, schema)` + `launchPlugin` 前置校验（失败抛路径化异常）
 6. ✅ **配置热更新 + 配置传递**：`InitializeResult.config` 宿主下发 `entry.config`（DataModel→JsonValue），插件侧 `PluginContext.config`（toDataModel 转回）；reconcile 的 `entryChanged` 检测 config 变更 → 重启插件 → 新配置生效（e2e：offset 10→100，add 结果 15→105）
 
-### 第三阶段：增强
+### 第三阶段：增强（✅ 已完成，P11）
 
-7. `isolate` 服务隔离（同名服务多实例，如多租户）
-8. `intercept` 服务级配置
-9. `accessor` / `mixin`（ctx 动态属性）
-10. `getEffects()` 诊断树
-11. timer / 命名 Logger
+7. **`isolate` 服务隔离**：⚪ 不做——进程隔离天然满足（每个插件即独立进程/实例，同名服务多实例即多插件），跨进程作用域隔离意义有限
+8. **`intercept` 服务级配置**：⚪ 不做——entry.config 已透传给插件（P10 配置传递），跨进程拦截语义弱
+9. **`accessor` / `mixin`**：⚪ 不做——仓颉无 Proxy 机制，PluginContext 为固定类，动态属性扩展不可行
+10. ✅ **effect 诊断树 `getEffects()`**：`ServiceRegistry.effect(disposer, label)` + `getEffects(): ArrayList<String>`；`ctx.effect(disposer, label)` + `ctx.getEffects()` 暴露
+11. ✅ **timer 工具**：`ctx.timeout/interval/throttle/debounce`（std.sync.Timer，全部可撤销，返回 cancel 函数）
+12. ✅ **命名 Logger**：`ctx.logger(name)` → `PluginLogger`（trace/debug/info/warn/error）；`LogParams.logger` 携带来源
+13. ✅ **事件 `on<T>` 类型安全**：`ctx.on<T>` / `once<T>` / `onVal<T>`（`T <: JsonDeserializable<T>`，args[0] 自动反序列化）
 
 ### 明确不做
 

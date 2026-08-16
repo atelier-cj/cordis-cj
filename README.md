@@ -317,6 +317,35 @@ public class CalcService <: Service {
 }
 ```
 
+#### `PluginLogger`（命名日志器）
+
+`ctx.logger(name)` 返回带名称的日志器，日志经宿主 log 通知并携带 `logger` 来源字段：
+
+```cangjie
+let db = ctx.logger("db")
+db.info("connected")        // 宿主 LogParams(logger="db", ...)
+ctx.log("info", "plain")    // 默认日志（logger=None）
+```
+
+#### timer 工具（`ctx.timeout/interval/throttle/debounce`）
+
+基于 `std.sync.Timer`，全部可撤销（返回 `() -> Unit` cancel 函数）：
+
+```cangjie
+let cancel = ctx.interval(1000, { => /* 每秒 */ })
+// ctx.timeout(ms, cb) 一次性；ctx.throttle(ms, cb) 节流；ctx.debounce(ms, cb) 防抖
+```
+
+#### 事件类型安全（`ctx.on<T>` / `once<T>` / `onVal<T>`）
+
+事件参数自动反序列化为 T（`T <: JsonDeserializable<T>`），订阅者直接操作仓颉类型：
+
+```cangjie
+ctx.on<GreetPayload>("greet", { payload =>
+    // payload: GreetPayload（自动从 args[0] 反序列化）
+})
+```
+
 ### 宿主侧（`ystyle::cordis_host`）
 
 #### `PluginManager`（进程管理）

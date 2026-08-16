@@ -6,7 +6,7 @@ import ystyle::jsonrpc_unix.UnixClientTransport
 import jsonvalue.*
 import stdx.serialization.serialization.*
 import stdx.encoding.json.stream.{JsonSerializable, JsonDeserializable}
-import std.collection.{HashMap, map, collectArray}
+import std.collection.{HashMap, ArrayList, map, collectArray}
 import std.sync.{Mutex, Condition}
 
 /**
@@ -76,6 +76,23 @@ public class PluginContext {
     }
 
     /**
+     * 注册可逆效果（带 label，docs/cordis-comparison.md §4 getEffects 诊断树）
+     * @param disposer 撤销回调
+     * @param label 效果标签（getEffects() 诊断展示）
+     */
+    public func effect(disposer: () -> Unit, label: String): Unit {
+        this.runtime.registry.effect(disposer, label)
+    }
+
+    /**
+     * 效果诊断树（docs/cordis-comparison.md §4，对齐 Cordis Fiber.getEffects）：
+     * 返回当前已注册效果的 label 列表（按注册顺序）
+     */
+    public func getEffects(): ArrayList<String> {
+        this.runtime.registry.getEffects()
+    }
+
+    /**
      * 经宿主转发调用其他插件的服务
      * @param service 目标服务 Key
      * @param method 服务方法名
@@ -110,7 +127,62 @@ public class PluginContext {
      * 发送日志到宿主（log 通知）
      */
     public func log(level: String, message: String): Unit {
-        this.runtime.sendLog(level, message)
+        this.runtime.sendLog(level, message, None)
+    }
+
+    /**
+     * 获取命名日志器（docs/cordis-comparison.md §4，对齐 Cordis `ctx.logger(name)`）
+     *
+     * 返回带名称的日志器，日志经宿主 log 通知并携带 logger 名称
+     * （宿主侧 LogParams.logger），可按来源区分。
+     *
+     * @param name 日志器名称（如 "db"、"http"）
+     * @return 命名日志器（trace/debug/info/warn/error 五个级别）
+     */
+    public func logger(name: String): PluginLogger {
+        PluginLogger(name, { n, level, message => this.runtime.sendLog(level, message, Some(n)) })
+    }
+
+    // ── 定时器（docs/cordis-comparison.md §4 timer）────────────────────
+
+    /**
+     * 一次性定时（对齐 Cordis ctx.timeout）
+     * @param delayMs 延迟毫秒
+     * @param callback 到期回调
+     * @return 撤销函数
+     */
+    public func timeout(delayMs: Int64, callback: () -> Unit): () -> Unit {
+        this.runtime.timers.timeout(delayMs, callback)
+    }
+
+    /**
+     * 周期定时（对齐 Cordis ctx.interval）
+     * @param periodMs 周期毫秒
+     * @param callback 周期回调
+     * @return 撤销函数
+     */
+    public func interval(periodMs: Int64, callback: () -> Unit): () -> Unit {
+        this.runtime.timers.interval(periodMs, callback)
+    }
+
+    /**
+     * 节流（对齐 Cordis ctx.throttle）：最小执行间隔内合并调用
+     * @param intervalMs 最小间隔毫秒
+     * @param callback 回调
+     * @return 触发函数
+     */
+    public func throttle(intervalMs: Int64, callback: () -> Unit): () -> Unit {
+        this.runtime.timers.throttle(intervalMs, callback)
+    }
+
+    /**
+     * 防抖（对齐 Cordis ctx.debounce）：静默 intervalMs 后执行最后一次
+     * @param intervalMs 静默毫秒
+     * @param callback 回调
+     * @return 触发函数
+     */
+    public func debounce(intervalMs: Int64, callback: () -> Unit): () -> Unit {
+        this.runtime.timers.debounce(intervalMs, callback)
     }
 
     /**
@@ -152,6 +224,76 @@ public class PluginContext {
      */
     public func onVal(event: String, listener: (Array<JsonValue>) -> ?JsonValue, once!: Bool = false, prepend!: Bool = false): String {
         this.runtime.subscribeEvent(event, listener, once: once, prepend: prepend)
+    }
+
+    /**
+     * 订阅事件（类型安全版，docs/cordis-comparison.md §4 on<T>）
+     *
+     * 事件参数自动反序列化为 T（T <: JsonDeserializable<T>）：
+     * 订阅者直接操作仓颉类型，省去手动 JsonValue 转换。
+     *
+     * ```cangjie
+     * ctx.on<AddRequest>("calc/add", { req =>
+     *     // req: AddRequest（自动从 args[0] 反序列化）
+     *     ctx.log("info", "got ${req.a} + ${req.b}")
+     * })
+     * ```
+     *
+     * @param event 事件名
+     * @param listener 回调（接收 T）
+     * @return 订阅 id
+     */
+    public func on<T>(event: String, listener: (T) -> Unit): String where T <: JsonDeserializable<T> {
+        this.runtime.subscribeEvent(event, { args =>
+            if (args.size > 0) {
+                try {
+                    let typed = JsonValue.toObject<T>(args[0])
+                    listener(typed)
+                } catch (e: Exception) {
+                    ()
+                }
+            }
+            None
+        })
+    }
+
+    /**
+     * 一次性订阅（类型安全版）
+     */
+    public func once<T>(event: String, listener: (T) -> Unit): String where T <: JsonDeserializable<T> {
+        this.runtime.subscribeEvent(event, { args =>
+            if (args.size > 0) {
+                try {
+                    let typed = JsonValue.toObject<T>(args[0])
+                    listener(typed)
+                } catch (e: Exception) {
+                    ()
+                }
+            }
+            None
+        }, once: true)
+    }
+
+    /**
+     * 订阅事件（返回值版，类型安全）
+     *
+     * 事件参数自动反序列化为 T；listener 返回 ?JsonValue
+     * （serial/bail/waterfall 派发模式用，语义同 onVal）。
+     */
+    public func onVal<T>(event: String, listener: (T) -> ?JsonValue, once!: Bool = false, prepend!: Bool = false): String
+        where T <: JsonDeserializable<T> {
+        this.runtime.subscribeEvent(event, { args =>
+            if (args.size > 0) {
+                try {
+                    let typed = JsonValue.toObject<T>(args[0])
+                    listener(typed)
+                } catch (e: Exception) {
+                    None
+                }
+            } else {
+                None
+            }
+        }, once: once, prepend: prepend)
     }
 
     /**
@@ -255,6 +397,8 @@ public class PluginRuntime {
     private var lastNotify: ?NotifyParams = None
     // 插件私有配置（宿主 initialize 响应下发，docs/cordis-comparison.md §4 配置传递）
     internal var pluginConfig: DataModel = DataModelNull()
+    // 定时器工具（ctx.timeout/interval/throttle/debounce）
+    internal let timers: PluginTimers = PluginTimers()
 
     /**
      * 以插件自身 stdio 为传输层启动（插件 main 的标准入口）
@@ -522,8 +666,8 @@ public class PluginRuntime {
     /**
      * 发送日志到宿主
      */
-    internal func sendLog(level: String, message: String): Unit {
-        this.server.notify<LogParams>(Methods.LOG, params: LogParams(level, message))
+    internal func sendLog(level: String, message: String, logger: ?String): Unit {
+        this.server.notify<LogParams>(Methods.LOG, params: LogParams(level, message, logger: logger))
     }
 
     internal prop rpcServer: JsonRpcServer {

@@ -4,7 +4,7 @@
 > 设计文档：`docs/design.md`（v1.0 草案）、`docs/design-impl.md`（v2.0 实现级）
 > 仓库：https://atomgit.com/ystyle/cordis-cj.git（MIT）
 
-## 总体计划（P0–P10）
+## 总体计划（P0–P11）
 
 | 阶段 | 内容 | 状态 |
 | :--- | :--- | :--- |
@@ -19,6 +19,7 @@
 | P8 | UDS 传输模式：transport 服务参数 + jsonrpc_unix 接线 | ✅ 完成 |
 | P9 | 语义核心（对齐 Cordis）：依赖 Waiting 重试 + 事件 v2 + 依赖变更通知 | ✅ 完成 |
 | P10 | 服务系统完善：配置传递 + Config schema 校验 + Service 类化 + 配置热更新 | ✅ 完成 |
+| P11 | 第三阶段增强：命名 Logger + timer + effect 诊断树 + on<T> 类型安全 | ✅ 完成 |
 | — | 收尾：合并 master、README、LICENSE、remote、workspace 依赖简化 | ✅ 完成 |
 
 ## 已完成
@@ -229,11 +230,29 @@
 
 **全量 98 用例通过**（新增 11）。
 
+### P11 — 第三阶段增强：命名 Logger + timer + effect 诊断树 + on<T>（分支 `feat/phase3-tools`）
+
+1. **命名 Logger**（`cordis_plugin/src/logger.cj`，对齐 Cordis `ctx.logger(name)`）：
+   - `PluginLogger`（trace/debug/info/warn/error）；`LogParams` 加 `logger: ?String`（向后兼容 None）；`ctx.logger(name)` 创建。
+   - 测试：`Phase3ToolsTest.testNamedLogger`（logger="db" 与默认区分）。
+2. **timer 工具**（`cordis_plugin/src/timer.cj`，对齐 Cordis timer）：
+   - `ctx.timeout/interval`（std.sync.Timer.once/repeat，可撤销）；`ctx.throttle/debounce`（ThrottleState/DebounceState 类封装状态，避免闭包捕获可变变量）。
+   - 测试：timeout 触发+撤销、interval 周期+撤销、throttle 合并（3 次调 1 次执行）、debounce 只执行最后一次。
+   - 踩坑：DateTime 无 toMillisecond → throttle 用 `MonoTime.now()` 相减比 Duration；throttle 首次应执行 → `lastRun: ?MonoTime = None` 首调必执行。
+3. **effect 诊断树**（`ServiceRegistry`，对齐 Cordis Fiber.getEffects）：
+   - `effect(disposer)` / `effect(disposer, label)`；effects 存 `(label, disposer)` 元组；`getEffects(): ArrayList<String>`（注册顺序）。
+   - 测试：`testGetEffectsDiagnostics`（两个带 label 效果可见）。
+4. **事件 `on<T>` 类型安全**（PluginContext，对齐 Cordis TS 泛型）：
+   - `ctx.on<T>` / `once<T>` / `onVal<T>`（`T <: JsonDeserializable<T>`）：事件 args[0] 自动反序列化为 T，listener 直接操作仓颉类型。
+   - 测试：`testOnTypedEvent`（GreetPayload DTO 经宿主 dispatch → 插件 on<T> 反序列化 → listener 收到）。
+   - 踩坑：jsonvalue 序列化 Number 为 float → DTO 数值字段用 Float64（Int64 反序列化失败）；`--show-all-output` 会把测试宏展开源码混入输出，断言失败时看 `logs=[...]` 实际值而非源码行；Float64 42.0 的 toString 是 "42.000000"（断言 startsWith 匹配）。
+
+**全量 104 用例通过**（新增 6）。
+
 ## 待办 / 下一步
 
-- [ ] 事件总线 `on<T>` 类型安全重载（当前保持 `Array<JsonValue>`）
 - [ ] 完整 Cordis `next` 洋葱回调 waterfall（跨进程远程回调协议；当前为链式传值近似）
-- [ ] 服务隔离 `isolate` / 拦截 `intercept` / `accessor` / `mixin` / effect 诊断树（cordis-comparison.md §4 第三阶段）
+- [ ] `on<T>` emit 侧类型安全（当前 `on<T>` 订阅已实现，emit<T> 发布待做）
 - [ ] Fiber 状态机完善：`await()/restart()/update()` 语义（当前崩溃自愈 + 配置热更新重启已覆盖主路径）
 - [ ] 发布流程（cangjie-publish）：注意宏库带 organization 跨模块消费缺陷——若对外发布宏，评估去 org 或实测中心仓拉取路径
-- [ ] cordis-cj 发版 0.2.0（P8 UDS + P9 语义核心 + P10 服务系统）
+- [ ] cordis-cj 发版 0.2.0（P8 UDS + P9 语义核心 + P10 服务系统 + P11 增强）
