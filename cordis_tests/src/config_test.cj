@@ -94,8 +94,45 @@ class ConfigLoaderTest {
         let cfg = ConfigLoader.parseString(toml)
         @Expect(cfg.interval, 5)       // 默认 5
         @Expect(cfg.pingInterval, 30)  // 默认 30
+        @Expect(cfg.transport, "stdio") // 默认 stdio（管道）
+        @Expect(cfg.udsPath, "")        // 默认空
         @Expect(cfg.entries.size, 1)
         @Expect(cfg.entries[0].enabled)   // enabled 缺省为 true
+    }
+
+    @TestCase
+    func testParseTomlUdsMode(): Unit {
+        // UDS 模式：transport + uds_path 配置
+        let toml = """
+            transport = "uds"
+            uds_path = "/tmp/cordis-test.sock"
+
+            [[plugins]]
+            id = "db"
+            source = "./bin/db"
+            provide = ["db"]
+        """
+        let cfg = ConfigLoader.parseString(toml)
+        @Expect(cfg.transport, "uds")
+        @Expect(cfg.udsPath, "/tmp/cordis-test.sock")
+        @Expect(cfg.entries.size, 1)
+        @Expect(cfg.entries[0].id, "db")
+    }
+
+    @TestCase
+    func testSerializeRoundTripUds(): Unit {
+        // UDS 字段 serialize → deserialize 往返一致
+        let entry = PluginEntry("a", "./bin/a")
+        let entries = ArrayList<PluginEntry>()
+        entries.add(entry)
+        let cfg = CordisConfig(3, 15, "uds", "/tmp/cordis-r.sock", entries)
+        let dm = cfg.serialize()
+        let restored = CordisConfig.deserialize(dm)
+        @Expect(restored.interval, 3)
+        @Expect(restored.pingInterval, 15)
+        @Expect(restored.transport, "uds")
+        @Expect(restored.udsPath, "/tmp/cordis-r.sock")
+        @Expect(restored.entries.size, 1)
     }
 
     @TestCase

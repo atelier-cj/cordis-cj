@@ -319,6 +319,33 @@ public class PluginManager {
 }
 ```
 
+### 3.4 UDS 传输模式（`ystyle::jsonrpc_unix`，P8 新增）
+
+除默认的 stdio（管道）外，宿主与插件可通过 **Unix Domain Socket**（UDS）通信，由主框架服务参数（`CordisConfig.transport` / `uds_path`）全局切换：
+
+```toml
+transport = "uds"              # "stdio"（默认）| "uds"
+uds_path = "/tmp/cordis.sock"  # UDS 监听地址
+```
+
+**架构**：宿主为服务端（bind `uds_path`），插件为客户端（连接）。`PluginManager(udsPath)` 构造进入 UDS 模式，`launch` 时向插件进程 argv 追加 `--uds <path>`；插件侧 `PluginRuntime.runUds(path, ...)`（或 `parseUdsArg(args)` 自动识别）以 `UnixClientTransport` 连接。**握手/服务注册/事件/调用协议逻辑零改动**——仅替换传输层与帧协议：
+
+| 维度 | stdio（默认） | UDS |
+| :--- | :--- | :--- |
+| 传输层（宿主） | `PipeTransport`（子进程管道） | `UnixServerTransport.acceptConnection()` |
+| 传输层（插件） | `LineStdioTransport`（readln 逐行） | `UnixClientTransport(path)` |
+| 帧协议 | `NewlineFraming`（管道 read 阻塞坑） | `ContentLengthFraming`（标准，UDS read 可靠） |
+| 平台 | 全平台 | Linux/macOS（std.net 明确不支持 Windows） |
+| 崩溃检测 | stdout EOF | socket EOF（`read` 返回 -1/0 → `receive()` None） |
+
+**关键点**：
+
+- `jsonrpc_unix` 提供 `UnixServerTransport`（bind/accept）、`UnixClientTransport`（connect）、`UnixConnectionTransport`（包装已连接 socket），均实现 jsonrpc `Transport` 接口。
+- UDS 的 `UnixSocket.read(Array<Byte>)` 是标准流式读（EOF 返回 -1/0），**没有**管道 stdin 的 `ConsoleReader.read` 永久阻塞坑，因此使用 jsonrpc 默认的 `ContentLengthFraming`（与 MCP 等标准一致）。
+- bind 前必须 `removeIfExists(uds_path)` 清理残留 socket 文件（std.net 文档明确：文件已存在则 bind 失败）。
+- 宿主一次 bind，多插件依次连接：`launch` 同步 `acceptConnection`（超时 10s，超时判定插件启动失败并回收进程），accept 顺序与 launch 顺序一致。
+- 插件进程仍由宿主 spawn（`launch`），`terminate`/`isExited`/`forwardStderr` 逻辑与 stdio 模式完全一致；进程退出 → socket EOF → `JsonRpcClient` 自关 → 崩溃自愈信号源不变。
+
 ## 4. 协议定义（JSON-RPC 2.0，换行分隔帧）
 
 所有消息类实现 `JsonSerializable` / `JsonDeserializable<T>`（`stdx.encoding.json.stream`）。方法名常量：

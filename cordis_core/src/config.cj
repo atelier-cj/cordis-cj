@@ -93,6 +93,8 @@ public class PluginEntry <: Serializable<PluginEntry> {
 public class CordisConfig <: Serializable<CordisConfig> {
     public var interval: Int64 = 5        // 调谐周期（秒），默认 5
     public var pingInterval: Int64 = 30   // 探活周期（秒），默认 30
+    public var transport: String = "stdio" // 传输模式："stdio"（管道）| "uds"（Unix Domain Socket）
+    public var udsPath: String = ""       // UDS 模式下的监听 socket 路径（如 "/tmp/cordis.sock"）
     public var entries: ArrayList<PluginEntry> = ArrayList()
 
     public init() {}
@@ -103,10 +105,21 @@ public class CordisConfig <: Serializable<CordisConfig> {
         this.entries = entries
     }
 
+    public init(interval: Int64, pingInterval: Int64, transport: String, udsPath: String,
+                entries: ArrayList<PluginEntry>) {
+        this.interval = interval
+        this.pingInterval = pingInterval
+        this.transport = transport
+        this.udsPath = udsPath
+        this.entries = entries
+    }
+
     public func serialize(): DataModel {
         DataModelStruct()
             .add(field<Int64>("interval", this.interval))
             .add(field<Int64>("ping_interval", this.pingInterval))
+            .add(field<String>("transport", this.transport))
+            .add(field<String>("uds_path", this.udsPath))
             .add(field<ArrayList<PluginEntry>>("plugins", this.entries))
     }
 
@@ -118,6 +131,8 @@ public class CordisConfig <: Serializable<CordisConfig> {
         let r = CordisConfig()
         r.interval = match (dms.get("interval")) { case i: DataModelInt => i.getValue(); case _ => 5 }
         r.pingInterval = match (dms.get("ping_interval")) { case i: DataModelInt => i.getValue(); case _ => 30 }
+        r.transport = match (dms.get("transport")) { case s: DataModelString => s.getValue(); case _ => "stdio" }
+        r.udsPath = match (dms.get("uds_path")) { case s: DataModelString => s.getValue(); case _ => "" }
         r.entries = match (dms.get("plugins")) {
             case seq: DataModelSeq =>
                 let list = ArrayList<PluginEntry>()
