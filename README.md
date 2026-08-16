@@ -79,25 +79,22 @@ public class MyPlugin {
 
 #### 写法 B：显式 API（推荐外部插件作者）
 
-手写 `main` + `PluginRuntime.run`，不依赖宏，不受宏跨模块缺陷影响。**同一份代码可同时支持 stdio 与 UDS 两种传输**：用 `parseUdsArg(args)` 检测宿主传入的 `--uds <path>` 参数，有则走 UDS，否则走 stdio。
+手写 `main` + `PluginRuntime.run`，不依赖宏，不受宏跨模块缺陷影响。**同一份代码可同时支持 stdio 与 UDS 两种传输，插件完全无感**——`run()` 内部用 `std.env.getCommandLine()` 自动检测宿主传入的 `--uds <path>` 参数，有则走 UDS，否则走 stdio；`main` 无需接收/透传命令行参数。
 
 ```cangjie
 // my_plugin/src/main.cj（独立模块）
 import ystyle::cordis_plugin.*
 import jsonvalue.*
 
-main(args: Array<String>): Int64 {
+main(): Int64 {
     let handler = { ctx: PluginContext =>
         ctx.registerHandler("echo", { method, args =>
             if (args.size > 0) { args[0] } else { JsonValue.Null }
         })
         ctx.log("info", "plugin ready")
     }
-    // 宿主按 transport 配置传入 --uds 参数；无则默认 stdio
-    match (PluginRuntime.parseUdsArg(args)) {
-        case Some(path) => PluginRuntime.runUds(path, "my-plugin", [], ["echo"], handler)
-        case None       => PluginRuntime.run("my-plugin", [], ["echo"], handler)
-    }
+    // run 自动选择传输：宿主 uds 模式传 --uds <path>（getCommandLine 获取），否则 stdio
+    PluginRuntime.run("my-plugin", [], ["echo"], handler)
     return 0
 }
 ```
@@ -188,14 +185,14 @@ public var add: ServiceProxy
 
 ## 传输模式：stdio 与 UDS
 
-由 `CordisConfig.transport` 服务参数切换，**插件代码零感知**（`PluginRuntime.run` / `runUds` 自动选择，宿主自动传递 `--uds` 参数）：
+由 `CordisConfig.transport` 服务参数切换，**插件代码零感知**——`PluginRuntime.run` 内部用 `std.env.getCommandLine()` 自动检测宿主传入的 `--uds <path>` 参数，自动选择传输层（无需用户从 main 传参判断）：
 
 | 维度 | stdio（默认） | UDS |
 | :--- | :--- | :--- |
 | 宿主传输层 | `PipeTransport`（子进程管道） | `UnixServerTransport`（bind + accept） |
 | 插件传输层 | `LineStdioTransport`（readln 逐行） | `UnixClientTransport`（connect） |
 | 帧协议 | `NewlineFraming`（管道 read 阻塞坑） | `ContentLengthFraming`（标准） |
-| 插件侧入口 | `PluginRuntime.run(...)` | `PluginRuntime.runUds(path, ...)` |
+| 插件侧入口 | `PluginRuntime.run(...)`（自动检测，二选一） | 同左 |
 | 平台 | 全平台 | Linux/macOS（std.net 不支持 Windows） |
 | 崩溃检测 | stdout EOF | socket EOF（语义一致，自愈逻辑共用） |
 
@@ -264,9 +261,11 @@ let cfg = ConfigLoader.load("cordis.toml")                  // 文件
 
 | 方法 | 签名 | 说明 |
 | :--- | :--- | :--- |
-| `run` | `static run(pluginId: String, inject: Array<String>, provide: Array<String>, handler: (PluginContext) -> Unit)` | stdio 模式入口（换行帧） |
+| `run` | `static run(pluginId: String, inject: Array<String>, provide: Array<String>, handler: (PluginContext) -> Unit)` | 标准入口：自动检测传输（`getCommandLine()` 找 `--uds`，有则 UDS 否则 stdio） |
 | `run` | `static run(transport: Transport, pluginId: String, inject: Array<String>, provide: Array<String>, handler: (PluginContext) -> Unit)` | 自定义传输层（测试/特殊场景） |
-| `runUds` | `static runUds(udsPath: String, pluginId: String, inject: Array<String>, provide: Array<String>, handler: (PluginContext) -> Unit)` | UDS 模式入口（Content-Length 帧） |
+| `runUds` | `static runUds(udsPath: String, pluginId: String, inject: Array<String>, provide: Array<String>, handler: (PluginContext) -> Unit)` | 显式 UDS 入口（Content-Length 帧） |
+| `parseUdsArg` | `static parseUdsArg(args: Array<String>): ?String` | 解析 `--uds <path>`，未指定返回 None |
+| `autoUdsPath` | `static autoUdsPath(): ?String` | 从进程命令行自动解析 UDS 路径（`getCommandLine()`，异常退化为 None） |
 | `parseUdsArg` | `static parseUdsArg(args: Array<String>): ?String` | 解析 `--uds <path>`，未指定返回 None |
 
 #### `PluginContext`（插件业务上下文，`ctx`）

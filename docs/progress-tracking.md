@@ -249,6 +249,14 @@
 
 **全量 104 用例通过**（新增 6）。
 
+### P11.5 — 传输自动检测（`PluginRuntime.run` 免传参）
+
+- `PluginRuntime.run(...)` 内部用 `std.env.getCommandLine()` 获取进程命令行，`autoUdsPath()` 检测宿主传入的 `--uds <path>`（有则 UDS + ContentLengthFraming，无则 stdio + NewlineFraming）——**插件 main 无需接收/透传 args，直接 `main(): Int64 { PluginRuntime.run(...); return 0 }`**。
+- `parseUdsArg(args)` 保留（公共辅助）；`runUds(udsPath, ...)` 保留（显式 UDS 入口）；新增 `autoUdsPath()`（`getCommandLine()` 异常时退化为 None → stdio）。
+- 示例插件（e2e 等）main 去掉 `args` 参数与 match 分支；宏生成 main 本就无参，自动受益。
+- 测试：`Phase3ToolsTest.testAutoUdsPathDetection`（parseUdsArg 带/不带 --uds + autoUdsPath 当前进程 None）+ `UdsModeEndToEndTest`（真实宿主拉起，getCommandLine 识别 --uds 全过）。
+- 踩坑：`std.env.getCommandLine()` 文档标注平台差异（Windows 可获取/其他场景可能异常），`autoUdsPath` 用 try-catch 兜底退化为 stdio。
+
 ## 待办 / 下一步
 
 - [ ] 完整 Cordis `next` 洋葱回调 waterfall（跨进程远程回调协议；当前为链式传值近似）

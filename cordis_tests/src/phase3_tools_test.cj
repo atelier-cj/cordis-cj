@@ -138,6 +138,19 @@ public class GreetPayload <: JsonDeserializable<GreetPayload> & JsonSerializable
 class Phase3ToolsTest {
 
     @TestCase
+    func testAutoUdsPathDetection(): Unit {
+        // 传输自动检测（docs/cordis-comparison.md）：run() 内部用
+        // std.env.getCommandLine() 获取进程命令行，无需用户从 main 传参。
+        // 1. parseUdsArg：带 --uds 解析出路径；无则 None
+        @Expect(PluginRuntime.parseUdsArg(["prog", "--uds", "/tmp/x.sock"]), Some("/tmp/x.sock"))
+        @Expect(PluginRuntime.parseUdsArg(["prog", "-x"]).isNone())
+        // 2. autoUdsPath：当前测试进程无 --uds 参数 → None（stdio 模式）
+        //    有 --uds 的场景由 UdsModeEndToEndTest（真实宿主拉起 + getCommandLine）覆盖
+        let detected = PluginRuntime.autoUdsPath()
+        @Expect(detected.isNone())   // 测试进程命令行不含 --uds
+    }
+
+    @TestCase
     func testNamedLogger(): Unit {
         // ctx.logger("db") → 宿主收到 LogParams(logger="db", ...)
         let (host, pluginT) = setupToolsHost()

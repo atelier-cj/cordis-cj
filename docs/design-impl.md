@@ -328,7 +328,7 @@ transport = "uds"              # "stdio"（默认）| "uds"
 uds_path = "/tmp/cordis.sock"  # UDS 监听地址
 ```
 
-**架构**：宿主为服务端（bind `uds_path`），插件为客户端（连接）。`PluginManager(udsPath)` 构造进入 UDS 模式，`launch` 时向插件进程 argv 追加 `--uds <path>`；插件侧 `PluginRuntime.runUds(path, ...)`（或 `parseUdsArg(args)` 自动识别）以 `UnixClientTransport` 连接。**握手/服务注册/事件/调用协议逻辑零改动**——仅替换传输层与帧协议：
+**架构**：宿主为服务端（bind `uds_path`），插件为客户端（连接）。`PluginManager(udsPath)` 构造进入 UDS 模式，`launch` 时向插件进程 argv 追加 `--uds <path>`；插件侧 `PluginRuntime.run(...)` 内部用 `std.env.getCommandLine()` 自动检测 `--uds`（无需用户从 main 传参），命中则以 `UnixClientTransport` 连接。**握手/服务注册/事件/调用协议逻辑零改动**——仅替换传输层与帧协议：
 
 | 维度 | stdio（默认） | UDS |
 | :--- | :--- | :--- |
