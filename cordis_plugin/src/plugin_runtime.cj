@@ -136,6 +136,16 @@ public class PluginContext {
     public func emit(event: String, args: Array<JsonValue>): Unit {
         this.runtime.emitEvent(event, args)
     }
+
+    /**
+     * 创建服务代理（@Inject 宏产物）
+     *
+     * @param serviceKey 目标服务 Key
+     * @return 经宿主 invoke 转发的代理
+     */
+    public func proxy(serviceKey: String): ServiceProxy {
+        ServiceProxy(this.runtime.rpcServer, serviceKey)
+    }
 }
 
 /**
@@ -240,31 +250,45 @@ public class PluginRuntime {
         this.server.register(Methods.NOTIFY, { ctx => this.handleNotify(ctx) })
         // ping：探活
         this.server.register(Methods.PING, { _ => HandlerResult.ok(JsonValue.Boolean(true)) })
-        // invoke：宿主转发的服务调用
-        this.server.register(Methods.INVOKE, { ctx => this.handleInvoke(ctx) })
-        // events/dispatch：宿主派发事件（docs/design-events.md §6）
-        this.server.register(Methods.EVENTS_DISPATCH, { ctx => this.handleEventDispatch(ctx) })
-    }
-
-    private func handleEventDispatch(ctx: HandlerContext): HandlerResult {
-        match (ctx.getParams<DispatchParams>()) {
-            case Some(params) =>
-                var listener: ?(Array<JsonValue>) -> Unit = None
-                synchronized(this.lock) {
-                    // dispatch 携带事件名；按事件名查找本地监听器
-                    if (this.listeners.contains(params.event)) {
-                        listener = this.listeners[params.event]
-                    }
+        // invoke：宿主转发的服务调用（异步 handler，支持 handler 内再发请求
+        // —— 如 @Inject 代理调用远程服务，接收线程不阻塞避免死锁）
+        this.server.registerAsync(Methods.INVOKE, { ctx, complete =>
+            spawn {
+                match (ctx.getParams<InvokeParams>()) {
+                    case Some(params) =>
+                        try {
+                            let result = this.registry.invokeHandler(params.service, params.method, params.args)
+                            complete(result)
+                        } catch (e: Exception) {
+                            complete(JsonValue.Null)
+                        }
+                    case None => complete(JsonValue.Null)
                 }
-                match (listener) {
-                    case Some(l) =>
-                        l(params.args)
-                        HandlerResult.ok(JsonValue.Boolean(true))
-                    case None =>
-                        HandlerResult.ok(JsonValue.Boolean(false))   // 无监听器，静默成功
+            }
+        })
+        // events/dispatch：宿主派发事件（异步 handler，listener 在独立线程执行，
+        // 支持 listener 内再发请求，接收线程不阻塞）
+        this.server.registerAsync(Methods.EVENTS_DISPATCH, { ctx, complete =>
+            spawn {
+                match (ctx.getParams<DispatchParams>()) {
+                    case Some(params) =>
+                        var listener: ?(Array<JsonValue>) -> Unit = None
+                        synchronized(this.lock) {
+                            if (this.listeners.contains(params.event)) {
+                                listener = this.listeners[params.event]
+                            }
+                        }
+                        match (listener) {
+                            case Some(l) =>
+                                l(params.args)
+                                complete(JsonValue.Boolean(true))
+                            case None =>
+                                complete(JsonValue.Boolean(false))
+                        }
+                    case None => complete(JsonValue.Boolean(false))
                 }
-            case None => HandlerResult.err(ErrorCodes.INVALID_PARAMS, "invalid dispatch params")
-        }
+            }
+        })
     }
 
     private func handleDispose(ctx: HandlerContext): HandlerResult {
@@ -279,19 +303,6 @@ public class PluginRuntime {
     private func handleNotify(ctx: HandlerContext): HandlerResult {
         // 通知无响应；插件可在此实现依赖图变化响应（如注销内部状态）
         HandlerResult.ok(JsonValue.Boolean(true))
-    }
-
-    private func handleInvoke(ctx: HandlerContext): HandlerResult {
-        match (ctx.getParams<InvokeParams>()) {
-            case Some(params) =>
-                try {
-                    let result = this.registry.invokeHandler(params.service, params.method, params.args)
-                    HandlerResult.ok(result)
-                } catch (e: Exception) {
-                    HandlerResult.err(ErrorCodes.INTERNAL_ERROR, "invoke failed: ${e.message}")
-                }
-            case None => HandlerResult.err(ErrorCodes.INVALID_PARAMS, "invalid invoke params")
-        }
     }
 
     /**
