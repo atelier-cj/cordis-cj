@@ -86,6 +86,19 @@ public class PluginContext {
     }
 
     /**
+     * 注册异步可逆效果（docs/cordis-comparison.md §4 async effect）
+     *
+     * disposer 返回 Future<Unit>（如 spawn 的异步清理任务）；插件卸载时
+     * disposeAll 等待所有异步 disposer 完成。
+     *
+     * @param disposer 撤销回调（返回 Future）
+     * @param label 效果标签
+     */
+    public func effectAsync(disposer: () -> Future<Unit>, label!: String = "async"): Unit {
+        this.runtime.registry.effectAsync(disposer, label: label)
+    }
+
+    /**
      * 效果诊断树（docs/cordis-comparison.md §4，对齐 Cordis Fiber.getEffects）：
      * 返回当前已注册效果的 label 列表（按注册顺序）
      */
@@ -197,7 +210,7 @@ public class PluginContext {
      * @return 订阅 id
      */
     public func on(event: String, listener: (Array<JsonValue>) -> Unit): String {
-        this.runtime.subscribeEvent(event, { args => listener(args); None })
+        this.runtime.subscribeEvent(event, { args, _ => listener(args); None })
     }
 
     /**
@@ -207,7 +220,7 @@ public class PluginContext {
      * @return 订阅 id
      */
     public func once(event: String, listener: (Array<JsonValue>) -> Unit): String {
-        this.runtime.subscribeEvent(event, { args => listener(args); None }, once: true)
+        this.runtime.subscribeEvent(event, { args, _ => listener(args); None }, once: true)
     }
 
     /**
@@ -224,7 +237,7 @@ public class PluginContext {
      * @return 订阅 id
      */
     public func onVal(event: String, listener: (Array<JsonValue>) -> ?JsonValue, once!: Bool = false, prepend!: Bool = false): String {
-        this.runtime.subscribeEvent(event, listener, once: once, prepend: prepend)
+        this.runtime.subscribeEvent(event, { args, _ => listener(args) }, once: once, prepend: prepend)
     }
 
     /**
@@ -245,7 +258,7 @@ public class PluginContext {
      * @return 订阅 id
      */
     public func on<T>(event: String, listener: (T) -> Unit): String where T <: JsonDeserializable<T> {
-        this.runtime.subscribeEvent(event, { args =>
+        this.runtime.subscribeEvent(event, { args, _ =>
             if (args.size > 0) {
                 try {
                     let typed = JsonValue.toObject<T>(args[0])
@@ -262,7 +275,7 @@ public class PluginContext {
      * 一次性订阅（类型安全版）
      */
     public func once<T>(event: String, listener: (T) -> Unit): String where T <: JsonDeserializable<T> {
-        this.runtime.subscribeEvent(event, { args =>
+        this.runtime.subscribeEvent(event, { args, _ =>
             if (args.size > 0) {
                 try {
                     let typed = JsonValue.toObject<T>(args[0])
@@ -283,11 +296,71 @@ public class PluginContext {
      */
     public func onVal<T>(event: String, listener: (T) -> ?JsonValue, once!: Bool = false, prepend!: Bool = false): String
         where T <: JsonDeserializable<T> {
-        this.runtime.subscribeEvent(event, { args =>
+        this.runtime.subscribeEvent(event, { args, _ =>
             if (args.size > 0) {
                 try {
                     let typed = JsonValue.toObject<T>(args[0])
                     listener(typed)
+                } catch (e: Exception) {
+                    None
+                }
+            } else {
+                None
+            }
+        }, once: once, prepend: prepend)
+    }
+
+    /**
+     * 订阅事件（waterfall 洋葱 next 版，docs/design-events.md §7）
+     *
+     * 完整对齐 Cordis `ctx.on(name, (args, next) => result)`：
+     * - listener 收到事件参数 + next 回调
+     * - 调用 next() 推进链到下一个订阅者（最终触发宿主内置行为）
+     * - 不调 next 直接返回 = veto 短路（该返回值即整条链的结果）
+     *
+     * 典型洋葱写法：
+     * ```cangjie
+     * ctx.onWaterfall("request", { args, next =>
+     *     // 前处理...
+     *     let result = next()          // 调用下一层（最终内置行为）
+     *     // 后处理...
+     *     result                        // 把结果继续传回上层
+     * })
+     * ```
+     *
+     * @param event 事件名
+     * @param listener 回调（参数列表, next）-> ?JsonValue
+     * @param once 一次性：首次派发后自动退订
+     * @param prepend 插到订阅列表头部
+     * @return 订阅 id
+     */
+    public func onWaterfall(event: String, listener: (Array<JsonValue>, () -> ?JsonValue) -> ?JsonValue,
+                            once!: Bool = false, prepend!: Bool = false): String {
+        this.runtime.subscribeEvent(event, { args, nextOpt =>
+            match (nextOpt) {
+                case Some(next) => listener(args, next)
+                // 非 waterfall 模式派发：next 退化为内置行为（None）
+                case None => listener(args, { => None })
+            }
+        }, once: once, prepend: prepend)
+    }
+
+    /**
+     * 订阅事件（waterfall 洋葱 next 版，类型安全）
+     *
+     * 同 onWaterfall，事件参数自动反序列化为 T。
+     */
+    public func onWaterfall<T>(event: String, listener: (T, () -> ?JsonValue) -> ?JsonValue,
+                               once!: Bool = false, prepend!: Bool = false): String
+        where T <: JsonDeserializable<T> {
+        this.runtime.subscribeEvent(event, { args, nextOpt =>
+            if (args.size > 0) {
+                try {
+                    let typed = JsonValue.toObject<T>(args[0])
+                    match (nextOpt) {
+                        case Some(next) => listener(typed, next)
+                        case None => listener(typed, { => None })
+                    }
                 } catch (e: Exception) {
                     None
                 }
@@ -337,15 +410,70 @@ public class PluginContext {
     }
 
     /**
-     * 链式传值（waterfall 模式，docs/design-events.md §7）：
-     * 前一个订阅者返回的非 bail 值作为下一个订阅者的参数；
-     * 返回最后一个 bail 值
+     * 链式派发（waterfall 模式，docs/design-events.md §7 洋葱 next）：
+     *
+     * 完整对齐 Cordis waterfall：宿主把订阅者串成洋葱链，最外层订阅者
+     * 收到 (args, next)；调用 next() 推进到下一层（最终内置行为），
+     * 返回非 null 值则 veto 短路。整条链的结果 = 最外层订阅者的返回值。
+     *
      * @param event 事件名
      * @param args 事件参数
-     * @return 链式派发结果（最后一个 bail 值）；无时 None
+     * @return 链式派发结果（最外层订阅者返回值）；全部 next 到底时为 None
      */
     public func waterfall(event: String, args: Array<JsonValue>): ?JsonValue {
         this.runtime.emitEventSync(event, args, EventMode.WATERFALL)
+    }
+
+    // ── 类型安全发布（docs/cordis-comparison.md §4 emit<T>）──────────────
+
+    /**
+     * 发布事件（类型安全版，docs/cordis-comparison.md §4 emit<T>）
+     *
+     * 事件参数自动序列化（T <: JsonSerializable），发布者直接传仓颉类型，
+     * 省去手动 JsonValue 转换（与订阅侧 on<T> 配套）。
+     *
+     * ```cangjie
+     * ctx.emit<AddRequest>("calc/add", [AddRequest(2, 3)])
+     * ```
+     *
+     * @param event 事件名
+     * @param args 事件参数（自动序列化为 JsonValue）
+     */
+    public func emit<T>(event: String, args: Array<T>): Unit where T <: JsonSerializable {
+        let jsonArgs = args |> map { a: T => JsonValue.fromObject(a) } |> collectArray
+        this.runtime.emitEvent(event, jsonArgs, EventMode.EMIT)
+    }
+
+    /**
+     * 并发派发（类型安全版）
+     */
+    public func parallel<T>(event: String, args: Array<T>): Unit where T <: JsonSerializable {
+        let jsonArgs = args |> map { a: T => JsonValue.fromObject(a) } |> collectArray
+        this.runtime.emitEvent(event, jsonArgs, EventMode.PARALLEL)
+    }
+
+    /**
+     * 按序派发（类型安全版）
+     */
+    public func serial<T>(event: String, args: Array<T>): ?JsonValue where T <: JsonSerializable {
+        let jsonArgs = args |> map { a: T => JsonValue.fromObject(a) } |> collectArray
+        this.runtime.emitEventSync(event, jsonArgs, EventMode.SERIAL)
+    }
+
+    /**
+     * 同步按序派发（类型安全版）
+     */
+    public func bail<T>(event: String, args: Array<T>): ?JsonValue where T <: JsonSerializable {
+        let jsonArgs = args |> map { a: T => JsonValue.fromObject(a) } |> collectArray
+        this.runtime.emitEventSync(event, jsonArgs, EventMode.BAIL)
+    }
+
+    /**
+     * 链式传值（类型安全版）
+     */
+    public func waterfall<T>(event: String, args: Array<T>): ?JsonValue where T <: JsonSerializable {
+        let jsonArgs = args |> map { a: T => JsonValue.fromObject(a) } |> collectArray
+        this.runtime.emitEventSync(event, jsonArgs, EventMode.WATERFALL)
     }
 
     /**
@@ -388,9 +516,12 @@ public class PluginRuntime {
     private let server: JsonRpcServer
     private let pluginId: String
     private let lock: Mutex = Mutex()
-    // 事件监听器：事件名 -> listener（docs/design-events.md §6）
-    // listener 返回 ?JsonValue：emit 模式忽略；serial/bail/waterfall 作为派发结果
-    private let listeners: HashMap<String, (Array<JsonValue>) -> ?JsonValue> = HashMap<String, (Array<JsonValue>) -> ?JsonValue>()
+    // 事件监听器：事件名 -> listener（docs/design-events.md §6、§7）
+    // listener 返回 ?JsonValue：emit 模式忽略；serial/bail/waterfall 作为派发结果。
+    // 第二参数为 next 回调（waterfall 洋葱链用，docs/design-events.md §7）：
+    // 宿主派发时 nextAllowed=true 传 Some(next)，其余模式传 None。
+    private let listeners: HashMap<String, (Array<JsonValue>, ?(() -> ?JsonValue)) -> ?JsonValue> =
+        HashMap<String, (Array<JsonValue>, ?(() -> ?JsonValue)) -> ?JsonValue>()
     // 依赖变更通知：PROVIDER_CHANGED/DEPENDENCY_LOST 到达时唤醒等待中的握手重试
     private let retryCond: Condition
     private var dependencyChanged: Bool = false
@@ -607,11 +738,14 @@ public class PluginRuntime {
         // events/dispatch：宿主派发事件（异步 handler，listener 在独立线程执行，
         // 支持 listener 内再发请求，接收线程不阻塞）
         // listener 返回值 ?JsonValue 作为派发结果回给宿主（serial/bail/waterfall 用）
+        // waterfall 模式（params.nextAllowed）：构造 next 闭包传给 listener——
+        // next() 发 events/next 请求推进链，返回下一订阅者的结果
+        // （docs/design-events.md §7 洋葱 next）
         this.server.registerAsync(Methods.EVENTS_DISPATCH, { ctx, complete =>
             spawn {
                 match (ctx.getParams<DispatchParams>()) {
                     case Some(params) =>
-                        var listener: ?(Array<JsonValue>) -> ?JsonValue = None
+                        var listener: ?(Array<JsonValue>, ?(() -> ?JsonValue)) -> ?JsonValue = None
                         synchronized(this.lock) {
                             if (this.listeners.contains(params.event)) {
                                 listener = this.listeners[params.event]
@@ -619,9 +753,30 @@ public class PluginRuntime {
                         }
                         match (listener) {
                             case Some(l) =>
-                                match (l(params.args)) {
-                                    case Some(v) => complete(v)
-                                    case None => complete(JsonValue.Null)
+                                if (params.nextAllowed) {
+                                    // waterfall：构造 next 闭包（发 events/next 请求）
+                                    let next: () -> ?JsonValue = { =>
+                                        let result = this.server.request<NextParams, JsonValue>(
+                                            Methods.EVENTS_NEXT,
+                                            params: NextParams(params.emitId))
+                                        match (result) {
+                                            case Ok(v) =>
+                                                match (v) {
+                                                    case JsonValue.Null => None
+                                                    case other => Some(other)
+                                                }
+                                            case Err(e) => None
+                                        }
+                                    }
+                                    match (l(params.args, Some(next))) {
+                                        case Some(v) => complete(v)
+                                        case None => complete(JsonValue.Null)
+                                    }
+                                } else {
+                                    match (l(params.args, None)) {
+                                        case Some(v) => complete(v)
+                                        case None => complete(JsonValue.Null)
+                                    }
                                 }
                             case None =>
                                 complete(JsonValue.Boolean(false))
@@ -706,14 +861,15 @@ public class PluginRuntime {
     }
 
     /**
-     * 订阅事件（docs/design-events.md §6）
+     * 订阅事件（docs/design-events.md §6、§7）
      * @param event 事件名
-     * @param listener 回调（参数列表 → 可选结果）
+     * @param listener 回调（参数列表, next?）-> 可选结果；next 仅在 waterfall
+     *                 模式派发时非 None（docs/design-events.md §7 洋葱 next）
      * @param once 一次性：首次派发后自动退订
      * @param prepend 插到订阅列表头部
      * @return 订阅 id；插件卸载时自动退订（effect 语义）
      */
-    internal func subscribeEvent(event: String, listener: (Array<JsonValue>) -> ?JsonValue,
+    internal func subscribeEvent(event: String, listener: (Array<JsonValue>, ?(() -> ?JsonValue)) -> ?JsonValue,
                                  once!: Bool = false, prepend!: Bool = false): String {
         // 1. 向宿主发 events/subscribe 请求
         let result = this.server.request<SubscribeParams, SubscribeResult>(

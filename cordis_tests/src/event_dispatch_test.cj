@@ -26,6 +26,11 @@ import std.unittest.testmacro.*
 /**
  * 内存订阅者辅助：包装一个订阅者的 JSON-RPC 对端
  * @param respond 注入的 dispatch 响应函数（返回 JsonValue，模拟 listener 结果）
+ *
+ * waterfall 洋葱 next（docs/design-events.md §7）：
+ * - `waterfallRespond`：nextAllowed=true 时使用的响应函数，收到 (args, next)，
+ *   可调 next()（发 events/next 请求推进链）或直接返回值（veto 短路）
+ * - `registerNextHandler`：宿主侧注册 EVENTS_NEXT 处理器（推进 EventRegistry 链）
  */
 internal class MemSubscriber {
     let client: JsonRpcClient       // 宿主 → 订阅者 连接（装入 PluginInstance）
@@ -36,6 +41,8 @@ internal class MemSubscriber {
     let cond: Condition
     var calls: ArrayList<String> = ArrayList()   // 收到的 (emitId, args) 记录
     var respond: (Array<JsonValue>) -> JsonValue = { _ => JsonValue.Boolean(true) }
+    // waterfall 模式（nextAllowed=true）的响应函数：可调 next() 推进链
+    var waterfallRespond: ?(Array<JsonValue>, () -> ?JsonValue) -> JsonValue = None
 
     init(pluginId: String, respondFn: (Array<JsonValue>) -> JsonValue) {
         this.respond = respondFn
@@ -59,6 +66,8 @@ internal class MemSubscriber {
 
     private func registerDispatchHandler(): Unit {
         // events/dispatch 处理器：记录调用，返回注入的响应
+        // waterfall（nextAllowed=true）：构造 next 闭包（发 events/next 请求）
+        // 传给 waterfallRespond；否则用普通 respond
         this.server.registerAsync(Methods.EVENTS_DISPATCH, { ctx, complete =>
             spawn {
                 match (ctx.getParams<DispatchParams>()) {
@@ -67,9 +76,50 @@ internal class MemSubscriber {
                             this.calls.add("${params.emitId}:${params.mode}")
                             this.cond.notifyAll()
                         }
-                        complete(this.respond(params.args))
+                        if (params.nextAllowed) {
+                            match (this.waterfallRespond) {
+                                case Some(fn) =>
+                                    let next: () -> ?JsonValue = { =>
+                                        let result = this.server.request<NextParams, JsonValue>(
+                                            Methods.EVENTS_NEXT,
+                                            params: NextParams(params.emitId))
+                                        match (result) {
+                                            case Ok(v) =>
+                                                match (v) {
+                                                    case JsonValue.Null => None
+                                                    case other => Some(other)
+                                                }
+                                            case Err(e) => None
+                                        }
+                                    }
+                                    complete(fn(params.args, next))
+                                case None =>
+                                    complete(this.respond(params.args))
+                            }
+                        } else {
+                            complete(this.respond(params.args))
+                        }
                     case None => complete(JsonValue.Boolean(false))
                 }
+            }
+        })
+    }
+
+    /**
+     * 宿主侧注册 EVENTS_NEXT 处理器（waterfall 链推进）
+     * @param handler emitId -> 推进结果（通常转发给 EventRegistry.dispatchNext）
+     */
+    func registerNextHandler(handler: (String) -> ?JsonValue): Unit {
+        this.client.registerRequestHandler(Methods.EVENTS_NEXT, { req =>
+            match (req.params) {
+                case Some(p) =>
+                    let params = JsonValue.toObject<NextParams>(p)
+                    // 链结束/未找到链 → None：必须回 Some(Null)，否则请求方超时
+                    match (handler(params.emitId)) {
+                        case Some(v) => Some(v)
+                        case None => Some(JsonValue.Null)
+                    }
+                case None => Some(JsonValue.Null)
             }
         })
     }
@@ -171,19 +221,14 @@ class EventDispatchModeTest {
     }
 
     @TestCase
-    func testWaterfallChainsValues(): Unit {
+    func testWaterfallVetoShortCircuits(): Unit {
+        // 洋葱 next：订阅者1 不调 next 直接返回 = veto 短路，订阅者2 不应被调用
         let registry = EventRegistry()
-        // 订阅者1：返回 "x"（非 bail → 作为下一个参数）
-        let sub1 = MemSubscriber("a") { args => JsonValue.String("x") }
-        // 订阅者2：读取参数 args[0]（应为 "x"），返回 "got:x"
-        let sub2 = MemSubscriber("b") { args =>
-            let v = if (args.size > 0) {
-                match (args[0]) { case JsonValue.String(s) => s; case _ => "?" }
-            } else {
-                "?"
-            }
-            JsonValue.String("got:${v}")
-        }
+        let sub1 = MemSubscriber("a") { _ => JsonValue.Boolean(true) }
+        let sub2 = MemSubscriber("b") { _ => JsonValue.String("never") }
+        // 订阅者1：veto（返回 "veto"，不调 next）
+        sub1.waterfallRespond = { _, _ => JsonValue.String("veto") }
+        sub1.registerNextHandler({ emitId => registry.dispatchNext(emitId) })
         registry.subscribe("evt", "a", sub1.instance)
         registry.subscribe("evt", "b", sub2.instance)
 
@@ -191,11 +236,84 @@ class EventDispatchModeTest {
         match (result) {
             case Some(v) =>
                 match (v) {
-                    case JsonValue.String(s) => @Expect(s, "got:x")
-                    case _ => @Fail("expected waterfall result")
+                    case JsonValue.String(s) => @Expect(s, "veto")
+                    case _ => @Fail("expected veto value")
                 }
-            case None => @Fail("waterfall should return chained result")
+            case None => @Fail("veto should return value")
         }
+        @Expect(sub1.waitCalls(1))
+        @Expect(sub2.calls.size, 0)   // veto 短路，订阅者2 未调用
+
+        sub1.close()
+        sub2.close()
+    }
+
+    @TestCase
+    func testWaterfallNextChainsToNext(): Unit {
+        // 洋葱 next：订阅者1 调 next() → 链推进到订阅者2；订阅者2 veto "final"
+        // 订阅者1 返回 next() 的结果 → 最终结果 "final"
+        let registry = EventRegistry()
+        let sub1 = MemSubscriber("a") { _ => JsonValue.Boolean(true) }
+        let sub2 = MemSubscriber("b") { _ => JsonValue.String("never") }
+        // 订阅者1：调 next() 并返回其结果（洋葱透传）
+        sub1.waterfallRespond = { _, next =>
+            match (next()) {
+                case Some(v) => v
+                case None => JsonValue.Null
+            }
+        }
+        // 订阅者2：veto "final"
+        sub2.waterfallRespond = { _, _ => JsonValue.String("final") }
+        sub1.registerNextHandler({ emitId => registry.dispatchNext(emitId) })
+        sub2.registerNextHandler({ emitId => registry.dispatchNext(emitId) })
+        registry.subscribe("evt", "a", sub1.instance)
+        registry.subscribe("evt", "b", sub2.instance)
+
+        let result = registry.dispatch("evt", [JsonValue.Number(1.0)], EventMode.WATERFALL, "emit-1")
+        match (result) {
+            case Some(v) =>
+                match (v) {
+                    case JsonValue.String(s) => @Expect(s, "final")
+                    case _ => @Fail("expected chained result")
+                }
+            case None => @Fail("next chain should return final value")
+        }
+        // 两个订阅者都被调用（next 推进链）
+        @Expect(sub1.waitCalls(1))
+        @Expect(sub2.waitCalls(1))
+
+        sub1.close()
+        sub2.close()
+    }
+
+    @TestCase
+    func testWaterfallAllNextReturnsBuiltin(): Unit {
+        // 洋葱 next：所有订阅者都调 next（无人 veto）→ 链结束，返回内置行为 None
+        let registry = EventRegistry()
+        let sub1 = MemSubscriber("a") { _ => JsonValue.Boolean(true) }
+        let sub2 = MemSubscriber("b") { _ => JsonValue.Boolean(true) }
+        // 两个订阅者都透传 next() 的结果（不 veto）
+        sub1.waterfallRespond = { _, next =>
+            match (next()) {
+                case Some(v) => v
+                case None => JsonValue.Null
+            }
+        }
+        sub2.waterfallRespond = { _, next =>
+            match (next()) {
+                case Some(v) => v
+                case None => JsonValue.Null
+            }
+        }
+        sub1.registerNextHandler({ emitId => registry.dispatchNext(emitId) })
+        sub2.registerNextHandler({ emitId => registry.dispatchNext(emitId) })
+        registry.subscribe("evt", "a", sub1.instance)
+        registry.subscribe("evt", "b", sub2.instance)
+
+        let result = registry.dispatch("evt", [JsonValue.Number(1.0)], EventMode.WATERFALL, "emit-1")
+        @Expect(result.isNone())   // 全部 next 到底 → 内置行为 None
+        @Expect(sub1.waitCalls(1))
+        @Expect(sub2.waitCalls(1))
 
         sub1.close()
         sub2.close()

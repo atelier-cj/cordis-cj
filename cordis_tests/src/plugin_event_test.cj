@@ -36,6 +36,10 @@ private class EventFakeHost {
     var dispatchFn: ?(String, Array<JsonValue>) -> Unit = None
     // 请求式 emit 的分发函数（serial/bail/waterfall 用）：接收 EmitParams，返回聚合结果
     var emitRequestFn: ?(EmitParams) -> ?JsonValue = None
+    // waterfall 洋葱 next：EVENTS_NEXT 请求的响应函数（emitId -> 结果）
+    var nextFn: ?(String) -> ?JsonValue = None
+    // 收到的 events/next emitId 记录
+    var nextEmitIds: ArrayList<String> = ArrayList()
     // 订阅选项记录（once/prepend）
     var onceFlags: ArrayList<Bool> = ArrayList()
     var prependFlags: ArrayList<Bool> = ArrayList()
@@ -144,6 +148,28 @@ private func setupEventHost(): (EventFakeHost, ExpEventDuplexTransport) {
             case None => Some(JsonValue.Null)
         }
     })
+    // events/next（waterfall 洋葱 next）：记录 emitId，按注入的 nextFn 响应
+    client.registerRequestHandler(Methods.EVENTS_NEXT, { req =>
+        match (req.params) {
+            case Some(p) =>
+                match (JsonValue.toObject<NextParams>(p)) {
+                    case params =>
+                        synchronized(host.lock) {
+                            host.nextEmitIds.add(params.emitId)
+                            host.cond.notifyAll()
+                        }
+                        match (host.nextFn) {
+                            case Some(fn) =>
+                                match (fn(params.emitId)) {
+                                    case Some(v) => Some(v)
+                                    case None => Some(JsonValue.Null)
+                                }
+                            case None => Some(JsonValue.Null)
+                        }
+                }
+            case None => Some(JsonValue.Null)
+        }
+    })
     client.start()
     (host, pluginT)
 }
@@ -241,7 +267,7 @@ class PluginEventTest {
     }
 
     @TestCase
-    func testWaterfallChainsValues(): Unit {
+    func testWaterfallModePassesThrough(): Unit {
         // waterfall 模式协议往返：插件 waterfall() → 宿主请求（mode=waterfall）→ 返回结果
         let (host, pluginT) = setupEventHost()
         host.emitRequestFn = { params =>
@@ -264,6 +290,62 @@ class PluginEventTest {
         @Expect(host.waitCount(host.dispatched, 2))
         @Expect(host.dispatched[0], "mode:waterfall")
         @Expect(host.dispatched[1], "wf:got:x")
+        host.client.close()
+        pluginT.close()
+    }
+
+    @TestCase
+    func testOnWaterfallNextRoundTrip(): Unit {
+        // 完整洋葱 next 协议往返（docs/design-events.md §7）：
+        // 宿主 events/dispatch(nextAllowed=true) → 插件 onWaterfall listener
+        // → listener 调 next() → 插件发 events/next → 宿主响应
+        // → listener 返回结果 → dispatch 响应回宿主
+        let (host, pluginT) = setupEventHost()
+        // 宿主侧 events/next 响应：推进链（模拟链中下一订阅者 veto "inner"）
+        host.nextFn = { emitId =>
+            host.record(host.dispatched, "next:${emitId}")
+            Some(JsonValue.String("inner"))
+        }
+        host.dispatchFn = { event, args =>
+            // 宿主向插件发 events/dispatch（waterfall 模式 nextAllowed=true）
+            let result = host.client.call<JsonValue, JsonValue>(Methods.EVENTS_DISPATCH,
+                params: Some(JsonValue.fromObject(DispatchParams(event, args, "emit-1",
+                    mode: EventMode.WATERFALL, nextAllowed: true))))
+            match (result) {
+                case Ok(v) => host.record(host.dispatched, "dispatch-result:${v}")
+                case Err(e) => host.record(host.dispatched, "dispatch-err:${e}")
+            }
+        }
+        spawn {
+            PluginRuntime.run(pluginT, "evt-onion", [], [], { ctx =>
+                ctx.onWaterfall("onion-evt", { args, next =>
+                    // 洋葱：调 next() 推进链，取回结果（模拟 veto 短路时用返回值）
+                    let inner = next()
+                    match (inner) {
+                        case Some(v) =>
+                            host.record(host.dispatched, "inner:${v}")
+                            Some(v)
+                        case None =>
+                            host.record(host.dispatched, "inner:none")
+                            None
+                    }
+                })
+                // 触发一次 dispatch（宿主侧 dispatchFn 直接调 events/dispatch）
+                host.record(host.subscribed, "setup-done")
+            })
+        }
+        // 等待订阅完成（onWaterfall 注册 + setup-done），再手动触发 dispatch
+        @Expect(host.waitCount(host.subscribed, 2))
+        // 触发宿主扇出：模拟事件 emit → dispatch 到插件
+        match (host.dispatchFn) {
+            case Some(fn) => fn("onion-evt", [JsonValue.Number(1.0)])
+            case None => @Fail("dispatchFn should be set")
+        }
+        // 断言：插件收到 dispatch → listener 调 next → 宿主 nextFn 响应 → listener 返回
+        @Expect(host.waitCount(host.dispatched, 3))
+        @Expect(host.dispatched[0], "next:emit-1")
+        @Expect(host.dispatched[1].contains("inner"))
+        @Expect(host.dispatched[2].startsWith("dispatch-result:"))
         host.client.close()
         pluginT.close()
     }

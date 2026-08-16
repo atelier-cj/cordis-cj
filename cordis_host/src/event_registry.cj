@@ -29,6 +29,41 @@ public class Subscription {
 }
 
 /**
+ * waterfall 进行中的链状态（docs/design-events.md §7 洋葱 next）
+ *
+ * 一次 waterfall 派发注册一条链：订阅者快照 + 推进索引 + 传入参数。
+ * 每个订阅者收到 events/dispatch（nextAllowed=true）后，listener 可调用
+ * next 回调推进链（发 events/next 请求）；返回非 null 值则 veto 短路。
+ *
+ * 链状态跨连接存活：dispatchWaterfall 阻塞在订阅者 0 的响应上，期间
+ * events/next 请求在各订阅者连接上依次推进 index。
+ */
+internal class WaterfallChain {
+    public let event: String
+    public let targets: ArrayList<Subscription>
+    public let args: Array<JsonValue>
+    private var index: Int64 = 0
+    private let lock: Mutex = Mutex()
+
+    public init(event: String, targets: ArrayList<Subscription>, args: Array<JsonValue>) {
+        this.event = event
+        this.targets = targets
+        this.args = args
+    }
+
+    /**
+     * 推进到下一个订阅者
+     * @return 推进后的索引；>= targets.size 表示链已结束（内置行为）
+     */
+    public func advance(): Int64 {
+        synchronized(this.lock) {
+            this.index++
+            this.index
+        }
+    }
+}
+
+/**
  * 事件注册表（docs/design-events.md §5、§7）
  *
  * 管理插件的事件订阅与派发：
@@ -40,13 +75,17 @@ public class Subscription {
  *   · parallel：并发派发，等待全部完成
  *   · serial：按序派发，遇 bail 值（非 null/false）停止并返回
  *   · bail：同步按序，遇 bail 值停止并返回
- *   · waterfall：链式传值，前一个订阅者返回的非 null 值作为下一个的参数
+ *   · waterfall：洋葱 next 链——每个订阅者收到 (args, next)，
+ *     调用 next() 推进链，返回非 null 值 veto 短路；最外层订阅者
+ *     的返回值即整条链的结果（对齐 Cordis waterfall，§7）
  */
 public class EventRegistry {
     // 事件名 -> 订阅者列表（有序，保持注册顺序）
     private let subscribers: HashMap<String, ArrayList<Subscription>> = HashMap<String, ArrayList<Subscription>>()
     // subscriptionId -> Subscription（退订用）
     private let byId: HashMap<String, Subscription> = HashMap<String, Subscription>()
+    // waterfall 进行中的链：emitId -> 链上下文（docs/design-events.md §7 洋葱 next）
+    private let chains: HashMap<String, WaterfallChain> = HashMap<String, WaterfallChain>()
     private let lock: Mutex = Mutex()
     private var idCounter: Int64 = 0
 
@@ -167,8 +206,8 @@ public class EventRegistry {
      * - parallel：并发派发并等待全部完成，返回 None
      * - serial：按序派发，遇 bail 值（非 null/false）停止并返回该值
      * - bail：同步按序，遇 bail 值停止并返回该值
-     * - waterfall：链式传值——前一个订阅者返回的非 null 值作为
-     *   下一个订阅者的参数；返回最后一个非 null 结果
+     * - waterfall：洋葱 next 链——订阅者调用 next() 推进链、返回非 null
+     *   值 veto 短路；返回最外层订阅者的返回值（链全部 next 到底 → None）
      *
      * @param mode 派发模式（EventMode.*）
      * @param emitId 本次 emit 的唯一标识
@@ -244,28 +283,75 @@ public class EventRegistry {
     }
 
     /**
-     * waterfall 模式：链式传值——前一个订阅者返回的值作为下一个订阅者的参数；
-     * 返回 null/false 表示不修改（沿用当前参数）；最后一个订阅者的结果作为
-     * 最终返回值（docs/design-events.md §7）
+     * waterfall 模式（洋葱 next，docs/design-events.md §7）：
+     *
+     * 1. 注册链上下文（emitId → 订阅者快照 + 参数），调用订阅者 0
+     *    （nextAllowed=true，listener 收到 next 回调）。
+     * 2. 订阅者返回非 null 值 = veto 短路，该值即链结果；
+     *    返回 null 表示已调用 next() 推进链（events/next 请求驱动）。
+     * 3. 本方法阻塞在订阅者 0 的 dispatch 响应上——该响应最终包含
+     *    整条链的结果（next 递归沿响应路径完成），链结束移除上下文。
      */
     private func dispatchWaterfall(event: String, args: Array<JsonValue>, emitId: String): ?JsonValue {
         let targets = this.snapshot(event)
-        var current = args
-        var lastResult: ?JsonValue = None
-        for (sub in targets) {
-            let result = this.callSubscriber(sub, current, event, emitId, EventMode.WATERFALL)
-            match (result) {
-                case Some(v) =>
-                    // 非 null/false 的返回值：作为下一个订阅者的参数（链式传值），
-                    // 并记录为链式结果；null/false 表示不修改，继续用当前参数
-                    if (isBailValue(v)) {
-                        current = Array<JsonValue>(1, repeat: v)
-                        lastResult = Some(v)
-                    }
-                case None => ()
+        if (targets.size == 0) {
+            return None
+        }
+        let chain = WaterfallChain(event, targets, args)
+        synchronized(this.lock) {
+            this.chains[emitId] = chain
+        }
+        // 调用订阅者 0（阻塞直至其 dispatch 响应，响应含整条链结果）
+        let result = this.callSubscriber(targets[0], args, event, emitId, EventMode.WATERFALL, nextAllowed: true)
+        this.removeChain(emitId)
+        // 链全部 next 到底（无 veto）→ 订阅者响应为 null → 归一为 None（内置行为无值）
+        match (result) {
+            case Some(JsonValue.Null) => None
+            case other => other
+        }
+    }
+
+    /**
+     * events/next 请求处理：推进 waterfall 链到下一个订阅者
+     * @param emitId 链标识
+     * @return 下一订阅者的 dispatch 响应（该响应自身可能包含更深层的 next 链结果）
+     */
+    public func dispatchNext(emitId: String): ?JsonValue {
+        let chain: ?WaterfallChain = synchronized(this.lock) {
+            if (this.chains.contains(emitId)) {
+                Some(this.chains[emitId])
+            } else {
+                None
             }
         }
-        lastResult
+        match (chain) {
+            case Some(c) => this.waterfallNext(emitId, c)
+            case None => None
+        }
+    }
+
+    /**
+     * 推进到链的下一个订阅者
+     */
+    private func waterfallNext(emitId: String, chain: WaterfallChain): ?JsonValue {
+        let index = chain.advance()
+        if (index >= chain.targets.size) {
+            // 链结束：所有订阅者都调了 next（或无人 veto）→ 内置行为 None
+            this.removeChain(emitId)
+            return None
+        }
+        let sub = chain.targets[index]
+        // 调用下一个订阅者；其响应可能继续含 next 链
+        this.callSubscriber(sub, chain.args, chain.event, emitId, EventMode.WATERFALL, nextAllowed: true)
+    }
+
+    /**
+     * waterfall 链清理（dispatch 完成后移除）
+     */
+    private func removeChain(emitId: String): Unit {
+        synchronized(this.lock) {
+            this.chains.remove(emitId)
+        }
     }
 
     /**
@@ -288,12 +374,14 @@ public class EventRegistry {
 
     /**
      * 调用单个订阅者的 events/dispatch（携带派发模式）
+     * @param nextAllowed waterfall 模式：订阅者 listener 收到 next 回调（可推进链）
      * @return Some(返回值) 派发成功；None 订阅者超时/崩溃（自动清理）
      */
     private func callSubscriber(sub: Subscription, args: Array<JsonValue>,
-                                event: String, emitId: String, mode: String): ?JsonValue {
+                                event: String, emitId: String, mode: String,
+                                nextAllowed!: Bool = false): ?JsonValue {
         try {
-            let params = DispatchParams(event, args, emitId, mode: mode)
+            let params = DispatchParams(event, args, emitId, mode: mode, nextAllowed: nextAllowed)
             let result = sub.instance.client.call<JsonValue, JsonValue>(
                 Methods.EVENTS_DISPATCH,
                 params: Some(JsonValue.fromObject(params)),

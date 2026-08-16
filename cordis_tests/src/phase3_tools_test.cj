@@ -28,6 +28,7 @@ private class ToolsFakeHost {
     let lock: Mutex = Mutex()
     let cond: Condition
     var logs: ArrayList<String> = ArrayList()   // "logger:level:message"
+    var emits: ArrayList<String> = ArrayList()  // emit 事件名（emit<T> 测试用）
 
     init(client: JsonRpcClient) {
         this.client = client
@@ -47,9 +48,27 @@ private class ToolsFakeHost {
         }
     }
 
+    func waitEmits(n: Int64): Bool {
+        synchronized(this.lock) {
+            var waited = 0
+            while (this.emits.size < n && waited < 200) {
+                this.cond.wait(timeout: 50 * Duration.millisecond)
+                waited++
+            }
+            this.emits.size >= n
+        }
+    }
+
     func recordLog(entry: String): Unit {
         synchronized(this.lock) {
             this.logs.add(entry)
+            this.cond.notifyAll()
+        }
+    }
+
+    func recordEmit(entry: String): Unit {
+        synchronized(this.lock) {
+            this.emits.add(entry)
             this.cond.notifyAll()
         }
     }
@@ -80,9 +99,21 @@ private func setupToolsHost(): (ToolsFakeHost, ToolsDuplexTransport) {
     client.registerRequestHandler(Methods.EVENTS_SUBSCRIBE, { req =>
         Some(JsonValue.fromObject(SubscribeResult("sub-1")))
     })
-    // log 通知：记录 logger/level/message
+    // events/emit + log 通知：合并到同一个 callback（setNotificationCallback 是覆盖语义，
+    // 分开 set 会互相覆盖——P12 踩坑）
     client.setNotificationCallback({ notif =>
-        if (notif.method == Methods.LOG) {
+        if (notif.method == Methods.EVENTS_EMIT) {
+            match (notif.params) {
+                case Some(p) =>
+                    try {
+                        let ep = JsonValue.toObject<EmitParams>(p)
+                        host.recordEmit("${ep.event}:${ep.args.size}:${ep.mode}")
+                    } catch (e: Exception) {
+                        host.recordEmit("parse-err:${e.message}")
+                    }
+                case None => host.recordEmit("no-params")
+            }
+        } else if (notif.method == Methods.LOG) {
             match (notif.params) {
                 case Some(p) =>
                     match (JsonValue.toObject<LogParams>(p)) {
@@ -353,6 +384,123 @@ class Phase3ToolsTest {
         }
         @Expect(dispatchSucceeded)   // 宿主 → 插件 dispatch 成功
         @Expect(greetSeen)           // 插件 on<T> listener 触发
+        host.client.close()
+        pluginT.close()
+    }
+
+    @TestCase
+    func testEmitTyped(): Unit {
+        // emit<T> 发布侧类型安全：参数自动序列化为 JsonValue 传给宿主
+        let (host, pluginT) = setupToolsHost()
+        spawn {
+            PluginRuntime.run(pluginT, "tools-plugin", [], [], { ctx =>
+                // 对照：非泛型 emit（已知链路）+ 泛型 emit<T>（参数自动序列化）
+                ctx.emit("greet-plain", [JsonValue.String("x")])
+                ctx.emit<GreetPayload>("greet", [GreetPayload("alice", 1.0)])
+                ctx.emit<GreetPayload>("greet", [GreetPayload("bob", 2.0)])
+            })
+        }
+        // 断言：非泛型 emit + 泛型 emit<T> 通知均到达宿主（参数自动序列化）
+        var plainOk = false
+        var typedOk = false
+        for (i in 0..100) {
+            synchronized(host.lock) {
+                if (host.emits.contains("greet-plain:1:emit")) { plainOk = true }
+                if (host.emits.contains("greet:1:emit")) { typedOk = true }
+            }
+            if (plainOk && typedOk) { break }
+            sleep(50 * Duration.millisecond)
+        }
+        if (!plainOk) {
+            let allEmits = synchronized(host.lock) { ArrayList<String>(host.emits) }
+            @Fail("plain emit not received; emits=${allEmits}")
+        }
+        @Expect(plainOk)
+        @Expect(typedOk)
+        host.client.close()
+        pluginT.close()
+    }
+
+    @TestCase
+    func testAsyncEffectWaitedOnDispose(): Unit {
+        // async effect：disposeAll 等待异步 disposer 完成（同步+异步+服务）
+        let registry = ServiceRegistry()
+        let order = ArrayList<String>()
+        let lock = Mutex()
+        // 同步效果
+        registry.effect({ =>
+            synchronized(lock) { order.add("sync-1") }
+        }, "sync-1")
+        // 异步效果：延迟 200ms 完成
+        registry.effectAsync({ =>
+            spawn {
+                sleep(200 * Duration.millisecond)
+                synchronized(lock) { order.add("async-2") }
+            }
+        }, label: "async-2")
+        // 服务 disposer
+        registry.register("undo-1", { =>
+            synchronized(lock) { order.add("service-3") }
+        })
+        @Expect(registry.effectCount, 2)
+        @Expect(registry.serviceCount, 1)
+        registry.disposeAll()
+        @Expect(registry.effectCount, 0)
+        @Expect(registry.serviceCount, 0)
+        // 全部执行（异步被等待）：逆序效果（async-2 → sync-1）+ 服务最后
+        let snapshot = synchronized(lock) { ArrayList<String>(order) }
+        @Expect(snapshot.size, 3)
+        // 全部执行；异步效果（async-2）被等待完成（disposeAll 不提前返回）
+        @Expect(snapshot.contains("sync-1"))
+        @Expect(snapshot.contains("async-2"))
+        @Expect(snapshot.contains("service-3"))
+    }
+
+    @TestCase
+    func testSerialTyped(): Unit {
+        // serial<T> 发布侧类型安全：参数自动序列化 + 宿主聚合结果返回
+        let (host, pluginT) = setupToolsHost()
+        // 宿主请求式 emit：返回预设 bail 值
+        host.client.registerRequestHandler(Methods.EVENTS_EMIT, { req =>
+            match (req.params) {
+                case Some(p) =>
+                    match (JsonValue.toObject<EmitParams>(p)) {
+                        case ep =>
+                            synchronized(host.lock) {
+                                host.emits.add("${ep.event}:${ep.args.size}:${ep.mode}")
+                                host.cond.notifyAll()
+                            }
+                            Some(JsonValue.String("bailed"))
+                    }
+                case None => Some(JsonValue.Null)
+            }
+        })
+        spawn {
+            PluginRuntime.run(pluginT, "tools-plugin", [], [], { ctx =>
+                let result = ctx.serial<GreetPayload>("greet", [GreetPayload("carol", 3.0)])
+                match (result) {
+                    case Some(v) =>
+                        match (v) {
+                            case JsonValue.String(s) => host.recordLog("serial-result:${s}")
+                            case _ => host.recordLog("serial-unexpected")
+                        }
+                    case None => host.recordLog("serial-none")
+                }
+            })
+        }
+        var ok = false
+        for (i in 0..50) {
+            synchronized(host.lock) {
+                if (host.emits.contains("greet:1:serial") && host.logs.contains("serial-result:bailed")) {
+                    ok = true
+                }
+            }
+            if (ok) {
+                break
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(ok)
         host.client.close()
         pluginT.close()
     }
