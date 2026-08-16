@@ -42,10 +42,10 @@
 
 | # | 能力 | Cordis 4.x | cordis-cj | 差距 |
 | :--- | :--- | :--- | :--- | :--- |
-| 1 | 依赖未满足 Waiting 重试 | PENDING 状态，服务就绪自动启动 | initialize 依赖缺失**直接拒绝** | 🔴 语义级 |
-| 2 | 依赖变更自动通知重载 | `reflect.notify()` → 依赖者 fiber 重载 | 无（服务变更依赖者无感知） | 🔴 语义级 |
-| 3 | 事件派发模式 | emit / parallel / serial / bail / waterfall | 仅 emit（同步广播） | 🔴 高频 |
-| 4 | 事件 `once` / prepend / global / 过滤 | 完整 | 无 | 🟡 |
+| 1 | 依赖未满足 Waiting 重试 | PENDING 状态，服务就绪自动启动 | ✅ Pending 状态 + 重试循环 + notify 唤醒 | 🔴→✅ 已实现 |
+| 2 | 依赖变更自动通知重载 | `reflect.notify()` → 依赖者 fiber 重载 | ✅ PROVIDER_CHANGED/DEPENDENCY_LOST 通知 | 🔴→✅ 已实现 |
+| 3 | 事件派发模式 | emit / parallel / serial / bail / waterfall | ✅ 全部（含 once/prepend） | 🔴→✅ 已实现 |
+| 4 | 事件 `once` / prepend / global / 过滤 | 完整 | 🟡 once/prepend 已实现；global/过滤未做 | 🟡 |
 | 5 | Service 基类（类即服务） | 134 个服务子类 | key + handler 模式 | 🟡 高频 |
 | 6 | Config schema 校验 | standard-schema + ValidationError（含路径） | config 透传不校验 | 🟡 |
 | 7 | Fiber 状态机 | 6 态 + await/restart/update | Starting/Active/Unloading/Failed + 崩溃自愈 | 🟡 |
@@ -87,11 +87,11 @@
 
 ## 4. 建议补齐路线（按价值/成本排序）
 
-### 第一阶段：语义核心（对齐论文 + dsh 高频）
+### 第一阶段：语义核心（✅ 已完成，P9）—— 对齐论文 + dsh 高频
 
-1. **依赖 Waiting 重试**：initialize 依赖缺失 → 插件保持 PENDING 而非拒绝；宿主定时/事件驱动重试握手（`InstanceStatus.Pending`）
-2. **事件总线 v2**：`emit`（现有）/ `parallel` / `serial` / `bail` / `waterfall` + `once` + 上下文过滤 —— 这是 dsh 使用最密集的能力，也是 progress-tracking 既有待办
-3. **依赖变更通知**：服务撤销/变更时宿主通知依赖者（`notify` 通知已存在，补"依赖者自动重启/重握手"）
+1. ✅ **依赖 Waiting 重试**：initialize 依赖缺失 → 插件保持 PENDING 而非退出；插件侧重试循环 + 宿主置 `InstanceStatus.Pending`（`InstanceStatus.Pending`）
+2. ✅ **事件总线 v2**：`emit`（现有）/ `parallel` / `serial` / `bail` / `waterfall` + `once` + `prepend` + 订阅者返回值（`onVal`）—— 宿主聚合派发，对齐 Cordis DispatchMode
+3. ✅ **依赖变更通知**：服务提供 → `PROVIDER_CHANGED` 唤醒 Pending 依赖者立即重试；服务撤销 → `DEPENDENCY_LOST` 通知依赖者（对齐 Cordis `reflect.notify`）
 
 ### 第二阶段：服务系统完善
 

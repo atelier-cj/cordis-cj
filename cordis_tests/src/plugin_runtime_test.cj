@@ -26,11 +26,26 @@ private class FakeHost {
     var provided: ArrayList<String> = ArrayList()
     var logs: ArrayList<String> = ArrayList()
     var disposed: ArrayList<String> = ArrayList()
+    // 依赖就绪开关：false 时 initialize 返回 ok=false（模拟依赖缺失），
+    // true 后返回 ok=true（Waiting 重试测试用）
+    var depsReady: Bool = false
+    // 插件业务 handler 是否执行（Waiting 重试成功 → handler 运行）
+    var handlerRan: Bool = false
+    // 插件 handler 是否已开始（Pending 等待期检测用）
+    var handlerStarted: Bool = false
 
     init(client: JsonRpcClient) {
         this.client = client
         this.cond = synchronized(this.lock) {
             this.lock.condition()
+        }
+    }
+
+    // 标记插件 handler 已执行（跨线程安全）
+    func markHandlerRan(): Unit {
+        synchronized(this.lock) {
+            this.handlerRan = true
+            this.cond.notifyAll()
         }
     }
 
@@ -107,10 +122,139 @@ class PluginRuntimeTest {
         (host, pluginT)
     }
 
+    /**
+     * 宿主变体：initialize 返回由 depsReady 控制（false → 依赖缺失拒绝）
+     * 用于验证 Waiting 重试：插件保持 Pending 等待，依赖就绪后自动恢复
+     */
+    private static func setupPendingHost(): (FakeHost, MemoryDuplexTransport) {
+        let (hostT, pluginT) = MemoryDuplexTransport.pair()
+        let client = JsonRpcClient(hostT, framing: NewlineFraming())
+        let host = FakeHost(client)
+
+        // 宿主处理 initialize：依赖未就绪（depsReady=false）→ ok=false；就绪 → ok=true
+        client.registerRequestHandler(Methods.INITIALIZE, { req =>
+            let providers = HashMap<String, String>()
+            providers["db"] = "plugin-db"
+            let ready = synchronized(host.lock) { host.depsReady }
+            Some(JsonValue.fromObject(InitializeResult(ready, providers)))
+        })
+        // 宿主处理 provide / log / dispose（与 setupHost 一致）
+        client.registerRequestHandler(Methods.PROVIDE, { req =>
+            match (req.params) {
+                case Some(p) =>
+                    match (p["key"]) {
+                        case Some(JsonValue.String(k)) =>
+                            synchronized(host.lock) {
+                                host.provided.add(k)
+                                host.cond.notifyAll()
+                            }
+                        case _ => ()
+                    }
+                case None => ()
+            }
+            Some(JsonValue.fromObject(ProvideResult("undo-${host.provided.size}")))
+        })
+        client.setNotificationCallback({ notif =>
+            if (notif.method == Methods.LOG) {
+                match (notif.params) {
+                    case Some(p) =>
+                        match (p["message"]) {
+                            case Some(JsonValue.String(m)) =>
+                                synchronized(host.lock) {
+                                    host.logs.add(m)
+                                    host.cond.notifyAll()
+                                }
+                            case _ => ()
+                        }
+                    case None => ()
+                }
+            }
+        })
+        client.registerRequestHandler(Methods.DISPOSE, { req =>
+            synchronized(host.lock) {
+                host.disposed.add("dispose-req")
+                host.cond.notifyAll()
+            }
+            None
+        })
+        client.start()
+        (host, pluginT)
+    }
+
+    @TestCase
+    func testPendingRetryUntilDepsReady(): Unit {
+        // Waiting 重试（对齐 Cordis PENDING）：initialize 被拒（依赖缺失）时
+        // 插件不退出，保持等待；依赖就绪后重试成功并执行业务 handler
+        let (host, pluginT) = setupPendingHost()
+
+        spawn {
+            PluginRuntime.run(pluginT, "plugin-pending", ["db"], ["svc"], { ctx =>
+                host.markHandlerRan()
+            })
+        }
+
+        // 1. 依赖未就绪：插件应保持等待（handler 未执行），且进程不退出
+        //    （若插件崩溃退出，waitFor 会因连接关闭而无法继续，此处用轮询验证）
+        var remainedAlive = true
+        for (i in 0..20) {
+            if (host.handlerRan || pluginT.isClosed()) {
+                remainedAlive = false
+                break
+            }
+            sleep(100 * Duration.millisecond)
+        }
+        @Expect(remainedAlive)
+        @Expect(!host.handlerRan)
+
+        // 2. 依赖就绪 → 插件应重试成功并进入 handler
+        synchronized(host.lock) {
+            host.depsReady = true
+            host.cond.notifyAll()
+        }
+        let ok = host.waitFor({ => host.handlerRan })
+        @Expect(ok)
+
+        // 清理
+        host.client.close()
+        pluginT.close()
+    }
+
+    @TestCase
+    func testNotifyWakeupAcceleratesRetry(): Unit {
+        // 依赖变更通知（docs/cordis-comparison.md §4）：宿主发 PROVIDER_CHANGED
+        // 通知 → 插件立即重试握手（不等 1s 轮询间隔）
+        let (host, pluginT) = setupPendingHost()
+
+        spawn {
+            PluginRuntime.run(pluginT, "plugin-notify", ["db"], ["svc"], { ctx =>
+                host.markHandlerRan()
+            })
+        }
+
+        // 等待插件完成首次 initialize（被拒后进入 Pending 等待）。
+        // 用 sleep 确保已进入等待循环（首次握手 + 等待窗口）
+        sleep(600 * Duration.millisecond)
+        @Expect(!host.handlerRan)   // 依赖未就绪，handler 未执行
+
+        // 宿主：依赖就绪 + 发 PROVIDER_CHANGED 通知（应立即唤醒插件）
+        synchronized(host.lock) {
+            host.depsReady = true
+            host.cond.notifyAll()
+        }
+        host.client.notify<NotifyParams>(Methods.NOTIFY,
+            params: Some(NotifyParams(NotifyKind.PROVIDER_CHANGED, "db", provider: Some("plugin-db"))))
+
+        // 插件应快速恢复（<1s 轮询间隔，证明 notify 生效而非轮询等待）
+        let ok = host.waitFor({ => host.handlerRan })
+        @Expect(ok)
+
+        host.client.close()
+        pluginT.close()
+    }
+
     @TestCase
     func testHandshakeAndProvide(): Unit {
         let (host, pluginT) = setupHost()
-
         spawn {
             PluginRuntime.run(pluginT, "plugin-a", [], ["svc-a", "svc-b"], { ctx =>
                 ctx.log("info", "plugin started")

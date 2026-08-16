@@ -8,6 +8,7 @@ import std.deriving.*
 @Derive[Equatable, ToString]
 public enum InstanceStatus {
     | Starting       // 已 launch，等待 initialize 握手
+    | Pending        // initialize 依赖缺失，保持等待重试（对齐 Cordis PENDING）
     | Active         // 握手完成，服务已注册
     | Unloading      // dispose 流程中
     | Failed         // 启动失败/崩溃

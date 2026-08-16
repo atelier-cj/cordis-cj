@@ -33,6 +33,25 @@ public class NotifyKind {
 }
 
 /**
+ * 事件派发模式（docs/design-events.md §7，对齐 Cordis DispatchMode）
+ *
+ * - EMIT：同步广播，忽略订阅者返回值（fire-and-forget）
+ * - PARALLEL：并发派发，等待全部订阅者完成
+ * - SERIAL：按序派发，遇 bail 值（非 null/false）停止并返回
+ * - BAIL：同步按序派发，遇 bail 值停止并返回
+ * - WATERFALL：链式传值，前一个订阅者返回的非 null 值作为下一个的参数
+ */
+public class EventMode {
+    public static let EMIT: String = "emit"
+    public static let PARALLEL: String = "parallel"
+    public static let SERIAL: String = "serial"
+    public static let BAIL: String = "bail"
+    public static let WATERFALL: String = "waterfall"
+
+    private init() {}
+}
+
+/**
  * log.params 的 level 取值
  */
 public class LogLevel {

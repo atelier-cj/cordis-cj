@@ -185,6 +185,143 @@ class EndToEndTest {
     }
 
     @TestCase
+    func testDependencyWaitingLifecycle(): Unit {
+        // Waiting 重试端到端（对齐 Cordis PENDING，docs/cordis-comparison.md §4）：
+        // 消费者（inject_demo，依赖 add）先启动 → 依赖缺失 → 保持 Pending 等待；
+        // 提供者（e2e 插件提供 add）后启动 → 消费者自动重试握手成功 → Active。
+        let consumerBinary = "./target/release/bin/ystyle::cordis_plugin.examples.inject_demo"
+        let providerBinary = "./target/release/bin/ystyle::cordis_plugin.examples.e2e"
+        @Expect(exists(Path(consumerBinary)))
+        @Expect(exists(Path(providerBinary)))
+
+        let host = PluginHost(PluginManager())
+
+        // 1. 先启动消费者（依赖 add 尚未就绪）→ 应进入 Pending 而非退出/Active
+        let consumer = host.launchPlugin(PluginEntry("inject-demo", consumerBinary,
+            provide: ArrayList<String>.of(["calc"])))
+        var pending = false
+        for (i in 0..100) {
+            if (consumer.status == InstanceStatus.Pending) {
+                pending = true
+                break
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(pending)
+        @Expect(!host.state.hasService("add"))   // 依赖尚未提供
+
+        // 2. 提供者后启动（注册 add 服务）
+        let providerEntry = PluginEntry("e2e-provider", providerBinary,
+            provide: ArrayList<String>.of(["echo", "add"]))
+        host.launchPlugin(providerEntry)
+        // 等待 add 服务注册
+        var providerReady = false
+        for (i in 0..100) {
+            if (host.state.hasService("add")) {
+                providerReady = true
+                break
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(providerReady)
+
+        // 3. 消费者应自动重试握手成功 → Active（插件侧 Pending 重试循环）
+        var active = false
+        for (i in 0..200) {
+            if (consumer.status == InstanceStatus.Active) {
+                active = true
+                break
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(active)
+
+        // 4. 验证消费者服务可用（calc → 内部经代理调用 add）
+        let result = consumer.client.call<JsonValue, JsonValue>("invoke",
+            params: Some(JsonValue.fromObject(InvokeParams("calc", "calc", []))))
+        match (result) {
+            case Ok(v) =>
+                match (v) {
+                    case JsonValue.Number(n) => @Expect(n, 11.0)   // 5 + 6
+                    case _ => @Fail("expected number result")
+                }
+            case Err(e) => @Fail("pending consumer invoke failed: ${e}")
+        }
+
+        // 5. 清理
+        host.removePlugin("inject-demo")
+        host.removePlugin("e2e-provider")
+    }
+
+    @TestCase
+    func testDependencyNotificationOnRemove(): Unit {
+        // 依赖变更通知（docs/cordis-comparison.md §4）：
+        // 提供者被移除 → 宿主向 inject 了其服务的依赖者发 DEPENDENCY_LOST 通知
+        let consumerBinary = "./target/release/bin/ystyle::cordis_plugin.examples.inject_demo"
+        let providerBinary = "./target/release/bin/ystyle::cordis_plugin.examples.e2e"
+        @Expect(exists(Path(consumerBinary)))
+        @Expect(exists(Path(providerBinary)))
+
+        // 收集宿主日志（notifyDependents 输出 "notify dependency-lost ..."）
+        let logs = ArrayList<String>()
+        let logLock = Mutex()
+        let host = PluginHost(PluginManager(), { _, line =>
+            synchronized(logLock) {
+                logs.add(line)
+            }
+        })
+
+        // 1. 提供者先启动（注册 add）
+        let providerEntry = PluginEntry("e2e-provider", providerBinary,
+            provide: ArrayList<String>.of(["echo", "add"]))
+        host.launchPlugin(providerEntry)
+        var providerReady = false
+        for (i in 0..100) {
+            if (host.state.hasService("add")) {
+                providerReady = true
+                break
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(providerReady)
+
+        // 2. 消费者启动（inject add）→ Active
+        let consumer = host.launchPlugin(PluginEntry("inject-demo", consumerBinary,
+            provide: ArrayList<String>.of(["calc"])))
+        var active = false
+        for (i in 0..200) {
+            if (consumer.status == InstanceStatus.Active) {
+                active = true
+                break
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(active)
+
+        // 3. 移除提供者 → 宿主应向消费者（inject add）发 DEPENDENCY_LOST 通知
+        host.removePlugin("e2e-provider")
+        var notified = false
+        for (i in 0..100) {
+            synchronized(logLock) {
+                for (line in logs) {
+                    if (line.contains("notify dependency-lost add")) {
+                        notified = true
+                        break
+                    }
+                }
+            }
+            if (notified) {
+                break
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(notified)
+
+        // 4. 清理
+        host.removePlugin("inject-demo")
+    }
+
+    @TestCase
     func testMacroPluginLifecycle(): Unit {
         // 宏插件（@Plugin + @Provide 生成）端到端：握手/服务注册/invoke
         let macroBinary = "./target/release/bin/ystyle::cordis_plugin.examples.macro_demo"

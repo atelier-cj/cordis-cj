@@ -6,7 +6,7 @@ import ystyle::jsonrpc_unix.UnixClientTransport
 import jsonvalue.*
 import stdx.encoding.json.stream.{JsonSerializable, JsonDeserializable}
 import std.collection.{HashMap, map, collectArray}
-import std.sync.Mutex
+import std.sync.{Mutex, Condition}
 
 /**
  * 插件运行时上下文：暴露给插件业务逻辑的 API（docs/design-impl.md §6）
@@ -123,19 +123,85 @@ public class PluginContext {
      * @return 订阅 id
      */
     public func on(event: String, listener: (Array<JsonValue>) -> Unit): String {
-        this.runtime.subscribeEvent(event, listener)
+        this.runtime.subscribeEvent(event, { args => listener(args); None })
+    }
+
+    /**
+     * 一次性订阅（对齐 Cordis ctx.once）：首次派发后自动退订
+     * @param event 事件名
+     * @param listener 回调
+     * @return 订阅 id
+     */
+    public func once(event: String, listener: (Array<JsonValue>) -> Unit): String {
+        this.runtime.subscribeEvent(event, { args => listener(args); None }, once: true)
+    }
+
+    /**
+     * 订阅事件（返回值版 listener，供 serial/bail/waterfall 使用）
+     *
+     * 返回值语义：
+     * - None：不产生结果（对 serial/bail 视为未命中 bail；对 waterfall 视为不传值）
+     * - Some(v)：对 serial/bail 视为 bail 值（v 非 null/false）；对 waterfall 作为下一个订阅者的参数
+     *
+     * @param event 事件名
+     * @param listener 回调（返回 ?JsonValue）
+     * @param once 一次性：首次派发后自动退订
+     * @param prepend 插到订阅列表头部
+     * @return 订阅 id
+     */
+    public func onVal(event: String, listener: (Array<JsonValue>) -> ?JsonValue, once!: Bool = false, prepend!: Bool = false): String {
+        this.runtime.subscribeEvent(event, listener, once: once, prepend: prepend)
     }
 
     /**
      * 发布事件（docs/design-events.md §6）
      *
-     * 通知宿主扇出给所有订阅者，发布者不等待、不感知订阅者。
+     * emit 模式：通知宿主扇出给所有订阅者，发布者不等待、不感知订阅者。
      *
      * @param event 事件名
      * @param args 事件参数
      */
     public func emit(event: String, args: Array<JsonValue>): Unit {
-        this.runtime.emitEvent(event, args)
+        this.runtime.emitEvent(event, args, EventMode.EMIT)
+    }
+
+    /**
+     * 并发派发（docs/design-events.md §7）：宿主并发向所有订阅者派发，等待全部完成
+     * @param event 事件名
+     * @param args 事件参数
+     */
+    public func parallel(event: String, args: Array<JsonValue>): Unit {
+        this.runtime.emitEvent(event, args, EventMode.PARALLEL)
+    }
+
+    /**
+     * 按序派发（docs/design-events.md §7）：宿主按订阅顺序派发，
+     * 遇 bail 值（listener 返回非 null/false）停止并返回该值
+     * @param event 事件名
+     * @param args 事件参数
+     * @return 首个 bail 值；无订阅者命中时 None
+     */
+    public func serial(event: String, args: Array<JsonValue>): ?JsonValue {
+        this.runtime.emitEventSync(event, args, EventMode.SERIAL)
+    }
+
+    /**
+     * 同步按序派发（bail 模式）：同 serial，语义对齐 Cordis ctx.bail
+     */
+    public func bail(event: String, args: Array<JsonValue>): ?JsonValue {
+        this.runtime.emitEventSync(event, args, EventMode.BAIL)
+    }
+
+    /**
+     * 链式传值（waterfall 模式，docs/design-events.md §7）：
+     * 前一个订阅者返回的非 bail 值作为下一个订阅者的参数；
+     * 返回最后一个 bail 值
+     * @param event 事件名
+     * @param args 事件参数
+     * @return 链式派发结果（最后一个 bail 值）；无时 None
+     */
+    public func waterfall(event: String, args: Array<JsonValue>): ?JsonValue {
+        this.runtime.emitEventSync(event, args, EventMode.WATERFALL)
     }
 
     /**
@@ -169,7 +235,13 @@ public class PluginRuntime {
     private let pluginId: String
     private let lock: Mutex = Mutex()
     // 事件监听器：事件名 -> listener（docs/design-events.md §6）
-    private let listeners: HashMap<String, (Array<JsonValue>) -> Unit> = HashMap<String, (Array<JsonValue>) -> Unit>()
+    // listener 返回 ?JsonValue：emit 模式忽略；serial/bail/waterfall 作为派发结果
+    private let listeners: HashMap<String, (Array<JsonValue>) -> ?JsonValue> = HashMap<String, (Array<JsonValue>) -> ?JsonValue>()
+    // 依赖变更通知：PROVIDER_CHANGED/DEPENDENCY_LOST 到达时唤醒等待中的握手重试
+    private let retryCond: Condition
+    private var dependencyChanged: Bool = false
+    // 最近一次收到的依赖通知（供插件业务感知，docs/cordis-comparison.md §4）
+    private var lastNotify: ?NotifyParams = None
 
     /**
      * 以插件自身 stdio 为传输层启动（插件 main 的标准入口）
@@ -241,6 +313,9 @@ public class PluginRuntime {
     private init(server: JsonRpcServer, pluginId: String) {
         this.server = server
         this.pluginId = pluginId
+        this.retryCond = synchronized(this.lock) {
+            this.lock.condition()
+        }
     }
 
     private func start(inject: Array<String>, provide: Array<String>,
@@ -248,16 +323,34 @@ public class PluginRuntime {
         this.registerHandlers()
         this.server.start()   // 后台接收线程
 
-        // 握手：向宿主发 initialize 请求
-        let initResult = this.server.request<InitializeParams, InitializeResult>(
-            Methods.INITIALIZE,
-            params: InitializeParams(this.pluginId, inject, provide))
-        match (initResult) {
-            case Ok(r) =>
-                if (!r.ok) {
-                    throw Exception("initialize rejected by host: providers=${r.providers}")
-                }
-            case Err(e) => throw Exception("initialize failed: ${e}")
+        // 握手：向宿主发 initialize 请求。
+        // 依赖未满足（ok=false）时保持 Pending 等待重试，而非抛异常退出
+        // （对齐 Cordis PENDING 语义，docs/cordis-comparison.md §4）。
+        // 等待期间宿主 notify（PROVIDER_CHANGED）会唤醒立即重试。
+        var handshakeOk = false
+        while (!handshakeOk) {
+            if (this.server.isClosed()) {
+                return   // 宿主终止 → 连接关闭，正常退出
+            }
+            let initResult = this.server.request<InitializeParams, InitializeResult>(
+                Methods.INITIALIZE,
+                params: InitializeParams(this.pluginId, inject, provide),
+                timeout: 2 * Duration.second)
+            match (initResult) {
+                case Ok(r) =>
+                    if (r.ok) {
+                        handshakeOk = true
+                    }
+                    // ok=false：依赖未满足，进入等待重试
+                case Err(e) =>
+                    // 连接已关闭（宿主终止）则退出；否则视为临时失败重试
+                    if (this.server.isClosed()) {
+                        return
+                    }
+            }
+            if (!handshakeOk) {
+                this.waitForDependencyChange()
+            }
         }
 
         // 注册服务：为每个 provide 的 Key 向宿主申请 undo_id
@@ -276,6 +369,22 @@ public class PluginRuntime {
 
         // 卸载：逆序撤销所有效果与服务
         this.registry.disposeAll()
+    }
+
+    /**
+     * 等待依赖变化（最长 1s）：宿主 notify（PROVIDER_CHANGED/DEPENDENCY_LOST）
+     * 唤醒后立即重试握手；否则超时后按轮询节奏重试
+     */
+    private func waitForDependencyChange(): Unit {
+        synchronized(this.lock) {
+            // 先消费已到达的 notify（若在握手请求期间到达，无需再等）
+            this.dependencyChanged = false
+            while (!this.dependencyChanged) {
+                if (!this.retryCond.wait(timeout: 1 * Duration.second)) {
+                    return   // 超时：轮询重试
+                }
+            }
+        }
     }
 
     private func registerHandlers(): Unit {
@@ -305,11 +414,12 @@ public class PluginRuntime {
         })
         // events/dispatch：宿主派发事件（异步 handler，listener 在独立线程执行，
         // 支持 listener 内再发请求，接收线程不阻塞）
+        // listener 返回值 ?JsonValue 作为派发结果回给宿主（serial/bail/waterfall 用）
         this.server.registerAsync(Methods.EVENTS_DISPATCH, { ctx, complete =>
             spawn {
                 match (ctx.getParams<DispatchParams>()) {
                     case Some(params) =>
-                        var listener: ?(Array<JsonValue>) -> Unit = None
+                        var listener: ?(Array<JsonValue>) -> ?JsonValue = None
                         synchronized(this.lock) {
                             if (this.listeners.contains(params.event)) {
                                 listener = this.listeners[params.event]
@@ -317,8 +427,10 @@ public class PluginRuntime {
                         }
                         match (listener) {
                             case Some(l) =>
-                                l(params.args)
-                                complete(JsonValue.Boolean(true))
+                                match (l(params.args)) {
+                                    case Some(v) => complete(v)
+                                    case None => complete(JsonValue.Null)
+                                }
                             case None =>
                                 complete(JsonValue.Boolean(false))
                         }
@@ -338,8 +450,19 @@ public class PluginRuntime {
     }
 
     private func handleNotify(ctx: HandlerContext): HandlerResult {
-        // 通知无响应；插件可在此实现依赖图变化响应（如注销内部状态）
-        HandlerResult.ok(JsonValue.Boolean(true))
+        match (ctx.getParams<NotifyParams>()) {
+            case Some(params) =>
+                // 记录通知；PROVIDER_CHANGED（依赖就绪）唤醒等待中的握手重试
+                synchronized(this.lock) {
+                    this.lastNotify = params
+                    if (params.kind == NotifyKind.PROVIDER_CHANGED) {
+                        this.dependencyChanged = true
+                        this.retryCond.notifyAll()
+                    }
+                }
+                HandlerResult.ok(JsonValue.Boolean(true))
+            case None => HandlerResult.err(ErrorCodes.INVALID_PARAMS, "invalid notify params")
+        }
     }
 
     /**
@@ -393,14 +516,17 @@ public class PluginRuntime {
     /**
      * 订阅事件（docs/design-events.md §6）
      * @param event 事件名
-     * @param listener 回调（参数列表）
+     * @param listener 回调（参数列表 → 可选结果）
+     * @param once 一次性：首次派发后自动退订
+     * @param prepend 插到订阅列表头部
      * @return 订阅 id；插件卸载时自动退订（effect 语义）
      */
-    internal func subscribeEvent(event: String, listener: (Array<JsonValue>) -> Unit): String {
+    internal func subscribeEvent(event: String, listener: (Array<JsonValue>) -> ?JsonValue,
+                                 once!: Bool = false, prepend!: Bool = false): String {
         // 1. 向宿主发 events/subscribe 请求
         let result = this.server.request<SubscribeParams, SubscribeResult>(
             Methods.EVENTS_SUBSCRIBE,
-            params: SubscribeParams(event))
+            params: SubscribeParams(event, once: once, prepend: prepend))
         let subscriptionId = match (result) {
             case Ok(r) => r.subscriptionId
             case Err(e) => throw Exception("subscribe '${event}' failed: ${e}")
@@ -423,10 +549,29 @@ public class PluginRuntime {
     }
 
     /**
-     * 发布事件（docs/design-events.md §6）：通知宿主扇出，不等待订阅者
+     * 发布事件（docs/design-events.md §6、§7）：通知宿主扇出，不等待订阅者（emit 模式）
      */
-    internal func emitEvent(event: String, args: Array<JsonValue>): Unit {
+    internal func emitEvent(event: String, args: Array<JsonValue>, mode: String): Unit {
         this.server.notify<EmitParams>(Methods.EVENTS_EMIT,
-            params: EmitParams(event, args))
+            params: EmitParams(event, args, mode: mode))
+    }
+
+    /**
+     * 发布事件（同步模式：serial/bail/waterfall）：
+     * 请求宿主按模式派发，等待聚合结果返回
+     * @return 派发聚合结果（serial/bail/waterfall 有值；无命中时 None）
+     */
+    internal func emitEventSync(event: String, args: Array<JsonValue>, mode: String): ?JsonValue {
+        let result = this.server.request<EmitParams, JsonValue>(
+            Methods.EVENTS_EMIT,
+            params: EmitParams(event, args, mode: mode))
+        match (result) {
+            case Ok(v) =>
+                match (v) {
+                    case JsonValue.Null => None
+                    case other => Some(other)
+                }
+            case Err(e) => throw Exception("emit '${event}' (${mode}) failed: ${e}")
+        }
     }
 }

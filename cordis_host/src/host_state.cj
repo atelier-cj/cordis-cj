@@ -130,4 +130,21 @@ public class HostState {
             result
         }
     }
+
+    /**
+     * 依赖变更通知辅助：返回 inject 了指定服务 Key 的所有存活实例
+     * （docs/cordis-comparison.md §4 依赖变更通知）
+     * 使用插件 initialize 握手时上报的依赖（instance.injects）
+     */
+    public func dependentsOf(key: String): ArrayList<PluginInstance> {
+        synchronized(this.lock) {
+            let result = ArrayList<PluginInstance>()
+            for ((id, instance) in this.actual) {
+                if (instance.injects.contains(key)) {
+                    result.add(instance)
+                }
+            }
+            result
+        }
+    }
 }

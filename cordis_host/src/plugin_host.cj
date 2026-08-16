@@ -61,6 +61,10 @@ public class PluginHost {
                 case Some(p) =>
                     try {
                         let params = JsonValue.toObject<InitializeParams>(p)
+                        // 记录插件上报的依赖（依赖变更通知用，docs/cordis-comparison.md §4）
+                        synchronized(this.lock) {
+                            instance.injects = ArrayList<String>(params.inject.toArray())
+                        }
                         // 检查依赖是否全部就绪
                         let missing = this.checkMissing(params.inject)
                         if (missing.size == 0) {
@@ -70,7 +74,11 @@ public class PluginHost {
                             let providers = this.snapshotProviders(params.inject)
                             Some(JsonValue.fromObject(InitializeResult(true, providers)))
                         } else {
-                            this.logger(providerId, "initialize rejected: missing deps ${missing}")
+                            // 依赖未满足：保持 Pending 等待重试（插件侧会周期重发 initialize）
+                            synchronized(this.lock) {
+                                instance.status = InstanceStatus.Pending
+                            }
+                            this.logger(providerId, "initialize pending: missing deps ${missing}")
                             Some(JsonValue.fromObject(InitializeResult(false, HashMap<String, String>())))
                         }
                     } catch (e: Exception) {
@@ -94,6 +102,8 @@ public class PluginHost {
                         synchronized(this.lock) {
                             instance.provides[params.key] = undoId
                         }
+                        // 依赖变更通知：服务就绪 → 唤醒 Pending 依赖者重试握手
+                        this.notifyDependents(params.key, NotifyKind.PROVIDER_CHANGED, providerId)
                         Some(JsonValue.fromObject(ProvideResult(undoId)))
                     } catch (e: Exception) {
                         this.logger(providerId, "provide error: ${e.message}")
@@ -117,6 +127,7 @@ public class PluginHost {
         })
 
         // 插件 → 宿主：events/emit 通知 → 宿主扇出给订阅者（add 追加，不与 log 冲突）
+        // emit 模式是 fire-and-forget 通知；其他模式走下方请求 handler
         client.addNotificationCallback({ notif =>
             if (notif.method == Methods.EVENTS_EMIT) {
                 match (notif.params) {
@@ -131,6 +142,28 @@ public class PluginHost {
                         }
                     case None => ()
                 }
+            }
+        })
+
+        // 插件 → 宿主：events/emit 请求（parallel/serial/bail/waterfall 模式）
+        // 宿主按模式派发并聚合结果返回（docs/design-events.md §7）
+        client.registerRequestHandler(Methods.EVENTS_EMIT, { req =>
+            match (req.params) {
+                case Some(p) =>
+                    try {
+                        let params = JsonValue.toObject<EmitParams>(p)
+                        let emitId = this.allocateEmitId()
+                        let result = this.eventRegistry.dispatch(params.event, params.args, params.mode, emitId)
+                        this.logger(providerId, "emit ${params.event} mode=${params.mode}")
+                        match (result) {
+                            case Some(v) => Some(v)
+                            case None => Some(JsonValue.Null)
+                        }
+                    } catch (e: Exception) {
+                        this.logger(providerId, "emit request error: ${e.message}")
+                        Some(JsonValue.Null)
+                    }
+                case None => Some(JsonValue.Null)
             }
         })
 
@@ -177,7 +210,8 @@ public class PluginHost {
                 case Some(p) =>
                     try {
                         let params = JsonValue.toObject<SubscribeParams>(p)
-                        let subscriptionId = this.eventRegistry.subscribe(params.event, providerId, instance)
+                        let subscriptionId = this.eventRegistry.subscribe(params.event, providerId, instance,
+                            once: params.once, prepend: params.prepend)
                         this.logger(providerId, "subscribe ${params.event} -> ${subscriptionId}")
                         Some(JsonValue.fromObject(SubscribeResult(subscriptionId)))
                     } catch (e: Exception) {
@@ -353,7 +387,12 @@ public class PluginHost {
             case Some(inst) =>
                 this.logger(id, "removing")
                 this.eventRegistry.unsubscribeAll(id)   // 清理事件订阅（docs/design-events.md §8）
+                // 依赖变更通知：先收集被移除的服务 Key，通知依赖者（DEPENDENCY_LOST）
+                let removedKeys = this.state.servicesOf(id)
                 this.state.clearServicesByProvider(id)
+                for (key in removedKeys) {
+                    this.notifyDependents(key, NotifyKind.DEPENDENCY_LOST, None)
+                }
                 try {
                     this.manager.terminate(inst)
                 } catch (e: Exception) {
@@ -361,6 +400,32 @@ public class PluginHost {
                 }
                 this.state.removeInstance(id)
             case None => ()
+        }
+    }
+
+    /**
+     * 依赖变更通知（docs/cordis-comparison.md §4，对齐 Cordis reflect.notify）：
+     * 服务提供/撤销时，向 inject 了该服务 Key 的所有存活实例发 notify。
+     *
+     * - PROVIDER_CHANGED：服务就绪，唤醒 Pending 依赖者立即重试握手（而非等轮询）
+     * - DEPENDENCY_LOST：服务撤销，通知 Active 依赖者感知依赖丢失
+     *
+     * 通知以 notify 消息发送（不等待响应，fire-and-forget）；
+     * 插件侧 handleNotify 唤醒等待中的握手重试循环。
+     */
+    private func notifyDependents(key: String, kind: String, provider: ?String): Unit {
+        let dependents = this.state.dependentsOf(key)
+        if (dependents.size == 0) {
+            return
+        }
+        let params = NotifyParams(kind, key, provider: provider)
+        for (dep in dependents) {
+            try {
+                dep.client.notify<NotifyParams>(Methods.NOTIFY, params: Some(params))
+                this.logger(dep.entry.id, "notify ${kind} ${key}")
+            } catch (e: Exception) {
+                this.logger(dep.entry.id, "notify failed: ${e.message}")
+            }
         }
     }
 
