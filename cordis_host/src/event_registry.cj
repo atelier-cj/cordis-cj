@@ -1,6 +1,6 @@
 package ystyle::cordis_host
 
-import ystyle::cordis_core.{Methods, EmitParams, DispatchParams}
+import ystyle::cordis_core.{Methods, EventMode, EmitParams, DispatchParams}
 import ystyle::jsonrpc.JsonRpcClient
 import jsonvalue.JsonValue
 import std.collection.{HashMap, ArrayList}
@@ -14,23 +14,33 @@ public class Subscription {
     public let pluginId: String
     public let event: String
     public let instance: PluginInstance
+    public let once: Bool       // 一次性：首次派发后自动退订
+    public let prepend: Bool    // 插到订阅列表头部
 
-    public init(id: String, pluginId: String, event: String, instance: PluginInstance) {
+    public init(id: String, pluginId: String, event: String, instance: PluginInstance,
+                once!: Bool = false, prepend!: Bool = false) {
         this.id = id
         this.pluginId = pluginId
         this.event = event
         this.instance = instance
+        this.once = once
+        this.prepend = prepend
     }
 }
 
 /**
- * 事件注册表（docs/design-events.md §5）
+ * 事件注册表（docs/design-events.md §5、§7）
  *
  * 管理插件的事件订阅与派发：
- * - subscribe：插件订阅事件，分配 subscriptionId
+ * - subscribe：插件订阅事件，分配 subscriptionId（支持 once/prepend）
  * - unsubscribe：取消订阅
  * - unsubscribeAll：插件卸载时清理其全部订阅
- * - dispatch：向事件所有订阅者派发（同步按注册顺序，调订阅者连接 events/dispatch）
+ * - dispatch：按派发模式（EventMode.*）向事件所有订阅者派发
+ *   · emit：同步广播，忽略返回值
+ *   · parallel：并发派发，等待全部完成
+ *   · serial：按序派发，遇 bail 值（非 null/false）停止并返回
+ *   · bail：同步按序，遇 bail 值停止并返回
+ *   · waterfall：链式传值，前一个订阅者返回的非 null 值作为下一个的参数
  */
 public class EventRegistry {
     // 事件名 -> 订阅者列表（有序，保持注册顺序）
@@ -47,16 +57,24 @@ public class EventRegistry {
      * @param event 事件名
      * @param pluginId 订阅者插件 id
      * @param instance 订阅者实例（派发目标连接）
+     * @param once 一次性订阅：首次派发后自动退订
+     * @param prepend 插到订阅列表头部
      * @return 订阅 id
      */
-    public func subscribe(event: String, pluginId: String, instance: PluginInstance): String {
+    public func subscribe(event: String, pluginId: String, instance: PluginInstance,
+                          once!: Bool = false, prepend!: Bool = false): String {
         let id = this.allocateId()
-        let sub = Subscription(id, pluginId, event, instance)
+        let sub = Subscription(id, pluginId, event, instance, once: once, prepend: prepend)
         synchronized(this.lock) {
             if (!this.subscribers.contains(event)) {
                 this.subscribers[event] = ArrayList<Subscription>()
             }
-            this.subscribers[event].add(sub)
+            let list = this.subscribers[event]
+            if (prepend) {
+                list.add(sub, at: 0)
+            } else {
+                list.add(sub)
+            }
             this.byId[id] = sub
         }
         id
@@ -142,44 +160,177 @@ public class EventRegistry {
     }
 
     /**
-     * 向事件的所有订阅者派发（同步按注册顺序）
+     * 按派发模式向事件的所有订阅者派发
+     *
+     * 模式语义（docs/design-events.md §7）：
+     * - emit：同步按序派发，忽略返回值（fire-and-forget），返回 None
+     * - parallel：并发派发并等待全部完成，返回 None
+     * - serial：按序派发，遇 bail 值（非 null/false）停止并返回该值
+     * - bail：同步按序，遇 bail 值停止并返回该值
+     * - waterfall：链式传值——前一个订阅者返回的非 null 值作为
+     *   下一个订阅者的参数；返回最后一个非 null 结果
+     *
+     * @param mode 派发模式（EventMode.*）
      * @param emitId 本次 emit 的唯一标识
+     * @return 聚合结果（serial/bail/waterfall 有值；emit/parallel 为 None）
+     */
+    public func dispatch(event: String, args: Array<JsonValue>, mode: String, emitId: String): ?JsonValue {
+        if (mode == EventMode.PARALLEL) {
+            this.dispatchParallel(event, args, emitId)
+            None
+        } else if (mode == EventMode.SERIAL || mode == EventMode.BAIL) {
+            this.dispatchSerial(event, args, emitId)
+        } else if (mode == EventMode.WATERFALL) {
+            this.dispatchWaterfall(event, args, emitId)
+        } else {
+            // 默认 emit：同步广播，忽略返回值
+            this.dispatchEmitToAll(event, args, emitId)
+            None
+        }
+    }
+
+    /**
+     * 从 emit 通知解析并派发（PluginHost 的 events/emit 回调调用，emit 模式）
      * @return 成功派发的订阅者数量（跳过崩溃/超时的订阅者）
      */
-    public func dispatch(event: String, args: Array<JsonValue>, emitId: String): Int64 {
-        let targets = synchronized(this.lock) {
+    public func dispatchEmit(emitParams: EmitParams, emitId: String): Int64 {
+        this.dispatchEmitToAll(emitParams.event, emitParams.args, emitId)
+    }
+
+    // ── 各模式实现 ──────────────────────────────────────────────
+
+    private func snapshot(event: String): ArrayList<Subscription> {
+        synchronized(this.lock) {
             if (this.subscribers.contains(event)) {
                 ArrayList<Subscription>(this.subscribers[event])
             } else {
                 ArrayList<Subscription>()
             }
         }
+    }
+
+    /**
+     * emit 模式：同步按序派发，忽略返回值；once 订阅派发后自动退订
+     * @return 成功派发数量
+     */
+    private func dispatchEmitToAll(event: String, args: Array<JsonValue>, emitId: String): Int64 {
+        let targets = this.snapshot(event)
         var delivered: Int64 = 0
         for (sub in targets) {
-            try {
-                let params = DispatchParams(event, args, emitId)
-                let result = sub.instance.client.call<JsonValue, JsonValue>(
-                    Methods.EVENTS_DISPATCH,
-                    params: Some(JsonValue.fromObject(params)),
-                    timeout: 10 * Duration.second)
-                match (result) {
-                    case Ok(_) => delivered++
-                    case Err(e) =>
-                        // 派发失败（订阅者超时/崩溃）→ 跳过并自动清理
-                        this.unsubscribe(sub.id)
-                }
-            } catch (e: Exception) {
-                this.unsubscribe(sub.id)
+            let result = this.callSubscriber(sub, args, event, emitId, EventMode.EMIT)
+            if (result.isSome()) {
+                delivered++
             }
         }
         delivered
     }
 
     /**
-     * 从 emit 通知解析并派发（PluginHost 的 events/emit 回调调用）
+     * serial/bail 模式：按序派发，遇 bail 值（非 null/false）停止并返回
      */
-    public func dispatchEmit(emitParams: EmitParams, emitId: String): Int64 {
-        this.dispatch(emitParams.event, emitParams.args, emitId)
+    private func dispatchSerial(event: String, args: Array<JsonValue>, emitId: String): ?JsonValue {
+        let targets = this.snapshot(event)
+        for (sub in targets) {
+            let result = this.callSubscriber(sub, args, event, emitId, EventMode.SERIAL)
+            match (result) {
+                case Some(v) =>
+                    if (isBailValue(v)) {
+                        return Some(v)
+                    }
+                case None => ()
+            }
+        }
+        None
+    }
+
+    /**
+     * waterfall 模式：链式传值——前一个订阅者返回的值作为下一个订阅者的参数；
+     * 返回 null/false 表示不修改（沿用当前参数）；最后一个订阅者的结果作为
+     * 最终返回值（docs/design-events.md §7）
+     */
+    private func dispatchWaterfall(event: String, args: Array<JsonValue>, emitId: String): ?JsonValue {
+        let targets = this.snapshot(event)
+        var current = args
+        var lastResult: ?JsonValue = None
+        for (sub in targets) {
+            let result = this.callSubscriber(sub, current, event, emitId, EventMode.WATERFALL)
+            match (result) {
+                case Some(v) =>
+                    // 非 null/false 的返回值：作为下一个订阅者的参数（链式传值），
+                    // 并记录为链式结果；null/false 表示不修改，继续用当前参数
+                    if (isBailValue(v)) {
+                        current = Array<JsonValue>(1, repeat: v)
+                        lastResult = Some(v)
+                    }
+                case None => ()
+            }
+        }
+        lastResult
+    }
+
+    /**
+     * parallel 模式：并发派发并等待全部完成
+     */
+    private func dispatchParallel(event: String, args: Array<JsonValue>, emitId: String): Unit {
+        let targets = this.snapshot(event)
+        let futures = ArrayList<Future<Unit>>()
+        for (sub in targets) {
+            let target = sub
+            futures.add(spawn {
+                this.callSubscriber(target, args, event, emitId, EventMode.PARALLEL)
+                ()
+            })
+        }
+        for (fut in futures) {
+            fut.get()
+        }
+    }
+
+    /**
+     * 调用单个订阅者的 events/dispatch（携带派发模式）
+     * @return Some(返回值) 派发成功；None 订阅者超时/崩溃（自动清理）
+     */
+    private func callSubscriber(sub: Subscription, args: Array<JsonValue>,
+                                event: String, emitId: String, mode: String): ?JsonValue {
+        try {
+            let params = DispatchParams(event, args, emitId, mode: mode)
+            let result = sub.instance.client.call<JsonValue, JsonValue>(
+                Methods.EVENTS_DISPATCH,
+                params: Some(JsonValue.fromObject(params)),
+                timeout: 10 * Duration.second)
+            match (result) {
+                case Ok(v) =>
+                    this.consumeOnce(sub)
+                    Some(v)
+                case Err(e) =>
+                    // 派发失败（订阅者超时/崩溃）→ 跳过并自动清理
+                    this.unsubscribe(sub.id)
+                    None
+            }
+        } catch (e: Exception) {
+            this.unsubscribe(sub.id)
+            None
+        }
+    }
+
+    /**
+     * once 订阅派发后自动退订
+     */
+    private func consumeOnce(sub: Subscription): Unit {
+        if (sub.once) {
+            this.unsubscribe(sub.id)
+        }
+    }
+
+    /**
+     * 判断是否为 bail 值（对齐 Cordis isBailed：非 null、非 false）
+     */
+    private static func isBailValue(v: JsonValue): Bool {
+        match (v) {
+            case JsonValue.Null => false
+            case JsonValue.Boolean(b) => b
+            case _ => true
+        }
     }
 
     private func allocateId(): String {

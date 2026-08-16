@@ -297,31 +297,43 @@ public class InvokeParams <: JsonSerializable & JsonDeserializable<InvokeParams>
 
 /**
  * events/subscribe.params（插件 → 宿主）
+ * @param once 一次性订阅：首次派发后自动退订（对齐 Cordis ctx.once）
+ * @param prepend 插到订阅列表头部（对齐 Cordis EventOptions.prepend）
  */
 public class SubscribeParams <: JsonSerializable & JsonDeserializable<SubscribeParams> {
     public let event: String
+    public let once: Bool
+    public let prepend: Bool
 
-    public init(event: String) {
+    public init(event: String, once!: Bool = false, prepend!: Bool = false) {
         this.event = event
+        this.once = once
+        this.prepend = prepend
     }
 
     public func toJson(w: JsonWriter): Unit {
         w.startObject()
         w.writeName("event").writeValue(this.event)
+        w.writeName("once").writeValue(this.once)
+        w.writeName("prepend").writeValue(this.prepend)
         w.endObject()
     }
 
     public static func fromJson(r: JsonReader): SubscribeParams {
         r.startObject()
         var event: ?String = None
+        var once: Bool = false
+        var prepend: Bool = false
         while (r.peek() != EndObject) {
             match (r.readName()) {
                 case "event" => event = r.readValue<String>()
+                case "once" => once = r.readValue<Bool>()
+                case "prepend" => prepend = r.readValue<Bool>()
                 case _ => r.skip()
             }
         }
         r.endObject()
-        SubscribeParams(event.getOrThrow())
+        SubscribeParams(event.getOrThrow(), once: once, prepend: prepend)
     }
 }
 
@@ -386,21 +398,25 @@ public class UnsubscribeParams <: JsonSerializable & JsonDeserializable<Unsubscr
 }
 
 /**
- * events/emit.params（插件 → 宿主，通知）：发布事件
+ * events/emit.params（插件 → 宿主）：发布事件
+ * @param mode 派发模式（EventMode.*，默认 emit）
  */
 public class EmitParams <: JsonSerializable & JsonDeserializable<EmitParams> {
     public let event: String
     public let args: Array<JsonValue>
+    public let mode: String
 
-    public init(event: String, args: Array<JsonValue>) {
+    public init(event: String, args: Array<JsonValue>, mode!: String = EventMode.EMIT) {
         this.event = event
         this.args = args
+        this.mode = mode
     }
 
     public func toJson(w: JsonWriter): Unit {
         w.startObject()
         w.writeName("event").writeValue(this.event)
         w.writeName("args").writeValue(this.args)
+        w.writeName("mode").writeValue(this.mode)
         w.endObject()
     }
 
@@ -408,30 +424,35 @@ public class EmitParams <: JsonSerializable & JsonDeserializable<EmitParams> {
         r.startObject()
         var event: ?String = None
         var args: ?Array<JsonValue> = None
+        var mode: String = EventMode.EMIT
         while (r.peek() != EndObject) {
             match (r.readName()) {
                 case "event" => event = r.readValue<String>()
                 case "args" => args = r.readValue<Array<JsonValue>>()
+                case "mode" => mode = r.readValue<String>()
                 case _ => r.skip()
             }
         }
         r.endObject()
-        EmitParams(event.getOrThrow(), args.getOrThrow())
+        EmitParams(event.getOrThrow(), args.getOrThrow(), mode: mode)
     }
 }
 
 /**
  * events/dispatch.params（宿主 → 插件，请求）：向单个订阅者派发事件
+ * @param mode 派发模式（插件侧根据模式决定返回值语义）
  */
 public class DispatchParams <: JsonSerializable & JsonDeserializable<DispatchParams> {
     public let event: String
     public let args: Array<JsonValue>
     public let emitId: String
+    public let mode: String
 
-    public init(event: String, args: Array<JsonValue>, emitId: String) {
+    public init(event: String, args: Array<JsonValue>, emitId: String, mode!: String = EventMode.EMIT) {
         this.event = event
         this.args = args
         this.emitId = emitId
+        this.mode = mode
     }
 
     public func toJson(w: JsonWriter): Unit {
@@ -439,6 +460,7 @@ public class DispatchParams <: JsonSerializable & JsonDeserializable<DispatchPar
         w.writeName("event").writeValue(this.event)
         w.writeName("args").writeValue(this.args)
         w.writeName("emitId").writeValue(this.emitId)
+        w.writeName("mode").writeValue(this.mode)
         w.endObject()
     }
 
@@ -447,15 +469,17 @@ public class DispatchParams <: JsonSerializable & JsonDeserializable<DispatchPar
         var event: ?String = None
         var args: ?Array<JsonValue> = None
         var emitId: ?String = None
+        var mode: String = EventMode.EMIT
         while (r.peek() != EndObject) {
             match (r.readName()) {
                 case "event" => event = r.readValue<String>()
                 case "args" => args = r.readValue<Array<JsonValue>>()
                 case "emitId" => emitId = r.readValue<String>()
+                case "mode" => mode = r.readValue<String>()
                 case _ => r.skip()
             }
         }
         r.endObject()
-        DispatchParams(event.getOrThrow(), args.getOrThrow(), emitId.getOrThrow())
+        DispatchParams(event.getOrThrow(), args.getOrThrow(), emitId.getOrThrow(), mode: mode)
     }
 }

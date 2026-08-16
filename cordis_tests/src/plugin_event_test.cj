@@ -34,6 +34,11 @@ private class EventFakeHost {
     var emitted: ArrayList<String> = ArrayList()
     var dispatched: ArrayList<String> = ArrayList()
     var dispatchFn: ?(String, Array<JsonValue>) -> Unit = None
+    // 请求式 emit 的分发函数（serial/bail/waterfall 用）：接收 EmitParams，返回聚合结果
+    var emitRequestFn: ?(EmitParams) -> ?JsonValue = None
+    // 订阅选项记录（once/prepend）
+    var onceFlags: ArrayList<Bool> = ArrayList()
+    var prependFlags: ArrayList<Bool> = ArrayList()
 
     init(client: JsonRpcClient) {
         this.client = client
@@ -92,6 +97,8 @@ private func setupEventHost(): (EventFakeHost, ExpEventDuplexTransport) {
                     case params =>
                         synchronized(host.lock) {
                             host.subscribed.add(params.event)
+                            host.onceFlags.add(params.once)
+                            host.prependFlags.add(params.prepend)
                             host.cond.notifyAll()
                         }
                         Some(JsonValue.fromObject(SubscribeResult("sub-${host.subscribed.size}")))
@@ -117,6 +124,24 @@ private func setupEventHost(): (EventFakeHost, ExpEventDuplexTransport) {
                     }
                 case None => ()
             }
+        }
+    })
+    // events/emit 请求（parallel/serial/bail/waterfall）：按注入的请求分发函数处理
+    client.registerRequestHandler(Methods.EVENTS_EMIT, { req =>
+        match (req.params) {
+            case Some(p) =>
+                match (JsonValue.toObject<EmitParams>(p)) {
+                    case params =>
+                        synchronized(host.lock) {
+                            host.emitted.add(params.event)
+                            host.cond.notifyAll()
+                        }
+                        match (host.emitRequestFn) {
+                            case Some(fn) => fn(params)
+                            case None => Some(JsonValue.Null)
+                        }
+                }
+            case None => Some(JsonValue.Null)
         }
     })
     client.start()
@@ -179,6 +204,112 @@ class PluginEventTest {
         // 宿主确实收到了 emit
         @Expect(host.emitted.size >= 1)
         @Expect(host.emitted[0], "greet")
+        host.client.close()
+        pluginT.close()
+    }
+
+    @TestCase
+    func testSerialBailReturnsFirstBailValue(): Unit {
+        // serial 模式协议往返：插件 serial() → 宿主 EVENTS_EMIT 请求（mode=serial）
+        // → 返回聚合结果 → 插件收到。宿主响应由 emitRequestFn 预设
+        // （真实聚合逻辑由 EventDispatchModeTest 覆盖）
+        let (host, pluginT) = setupEventHost()
+        host.emitRequestFn = { params =>
+            // 验证 mode 正确传递
+            host.record(host.dispatched, "mode:${params.mode}")
+            Some(JsonValue.String("found"))
+        }
+        spawn {
+            PluginRuntime.run(pluginT, "evt-serial", [], [], { ctx =>
+                let result = ctx.serial("serial-evt", [JsonValue.Number(1.0)])
+                match (result) {
+                    case Some(v) =>
+                        match (v) {
+                            case JsonValue.String(s) => host.record(host.dispatched, "serial:${s}")
+                            case _ => host.record(host.dispatched, "serial:unexpected")
+                        }
+                    case None => host.record(host.dispatched, "serial:none")
+                }
+            })
+        }
+        // 宿主收到 mode=serial 请求，插件拿到 "found"
+        @Expect(host.waitCount(host.dispatched, 2))
+        @Expect(host.dispatched[0], "mode:serial")
+        @Expect(host.dispatched[1], "serial:found")
+        host.client.close()
+        pluginT.close()
+    }
+
+    @TestCase
+    func testWaterfallChainsValues(): Unit {
+        // waterfall 模式协议往返：插件 waterfall() → 宿主请求（mode=waterfall）→ 返回结果
+        let (host, pluginT) = setupEventHost()
+        host.emitRequestFn = { params =>
+            host.record(host.dispatched, "mode:${params.mode}")
+            Some(JsonValue.String("got:x"))
+        }
+        spawn {
+            PluginRuntime.run(pluginT, "evt-waterfall", [], [], { ctx =>
+                let result = ctx.waterfall("wf-evt", [JsonValue.Number(1.0)])
+                match (result) {
+                    case Some(v) =>
+                        match (v) {
+                            case JsonValue.String(s) => host.record(host.dispatched, "wf:${s}")
+                            case _ => host.record(host.dispatched, "wf:unexpected")
+                        }
+                    case None => host.record(host.dispatched, "wf:none")
+                }
+            })
+        }
+        @Expect(host.waitCount(host.dispatched, 2))
+        @Expect(host.dispatched[0], "mode:waterfall")
+        @Expect(host.dispatched[1], "wf:got:x")
+        host.client.close()
+        pluginT.close()
+    }
+
+    @TestCase
+    func testOnceAndPrependSubscriptionOptions(): Unit {
+        // once：订阅标记传递；prepend：订阅标记传递（真实退订逻辑由 EventDispatchModeTest 覆盖）
+        let (host, pluginT) = setupEventHost()
+        spawn {
+            PluginRuntime.run(pluginT, "evt-options", [], [], { ctx =>
+                ctx.once("once-evt", { args =>
+                    host.record(host.dispatched, "once-called")
+                })
+                ctx.onVal("prepend-evt", { args => None }, prepend: true)
+            })
+        }
+        // 等待两个订阅完成
+        @Expect(host.waitCount(host.subscribed, 2))
+        @Expect(host.onceFlags.size >= 1)
+        @Expect(host.onceFlags[0])
+        @Expect(host.prependFlags.size >= 2)
+        @Expect(host.prependFlags[1])
+        host.client.close()
+        pluginT.close()
+    }
+
+    @TestCase
+    func testParallelDispatchesToAll(): Unit {
+        // parallel 模式：插件 parallel() 以通知发出（mode=parallel，fire-and-forget）
+        // 宿主 notificationCallback 记录；插件侧不等待
+        let (host, pluginT) = setupEventHost()
+        host.dispatchFn = { event, args =>
+            host.record(host.emitted, "dispatched:${event}")
+        }
+        spawn {
+            PluginRuntime.run(pluginT, "evt-parallel", [], [], { ctx =>
+                ctx.parallel("par-evt", [JsonValue.Number(1.0)])
+                host.record(host.dispatched, "parallel-done")
+            })
+        }
+        // 宿主收到 parallel 通知
+        @Expect(host.waitCount(host.emitted, 1))
+        @Expect(host.emitted[0], "par-evt")
+        // 插件侧 parallel() 不阻塞（立即返回后标记 done）
+        @Expect(host.waitCount(host.dispatched, 1))
+        @Expect(host.dispatched[0], "parallel-done")
         host.client.close()
         pluginT.close()
     }

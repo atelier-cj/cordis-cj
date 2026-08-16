@@ -157,11 +157,21 @@ public func emit(event: String, args: Array<JsonValue>): Unit {
 | 版本 | 模式 | 语义 | 实现 |
 | :--- | :--- | :--- | :--- |
 | **v1** | `emit` | 同步广播：宿主按注册顺序逐个派发，不等返回值 | 宿主遍历 `subscribers[event]`，逐连接发 `events/dispatch`（同步等待响应） |
-| v2 | `waterfall` | 中间件链：订阅者可改写/短路（`next` 语义） | dispatch 参数带 `next` 标志，宿主按序传递返回值 |
-| v2 | `parallel` | 并发派发 | 宿主并发发 `events/dispatch` 后聚合 |
-| v2 | `serial` | 按序直到订阅者"表态" | 宿主逐发，遇非空返回值停止 |
+| **v2** | `waterfall` | 链式传值：订阅者返回非 null/false 值作为下一个订阅者的参数 | `DispatchParams.mode` 携带模式，宿主按序传递返回值，返回最后一个结果 |
+| **v2** | `parallel` | 并发派发：宿主并发发 `events/dispatch`，等待全部完成 | `dispatch` 模式分支 spawn 并发 |
+| **v2** | `serial` | 按序直到订阅者"表态"：遇 bail 值（非 null/false）停止并返回 | 宿主逐发，检查返回值 `isBailValue` |
+| **v2** | `bail` | 同步按序，遇 bail 值停止（serial 的同步语义） | 复用 `dispatchSerial` |
 
-> v1 只做 `emit`：事件参数 `Array<JsonValue>`、宿主同步按序派发、无返回值聚合。waterfall/parallel/serial 需要"返回值跨进程回传 + 顺序/并发控制"，复杂度高，列入 v2。
+**v2 协议扩展**（docs/design-impl.md §4、P9）：
+
+- `EmitParams` 加 `mode` 字段（`EventMode.*`：emit/parallel/serial/bail/waterfall）
+- `DispatchParams` 加 `mode` 字段（订阅者侧语义一致，返回值 `?JsonValue` 经 `events/dispatch` 响应回传）
+- `SubscribeParams` 加 `once`（一次性：首次派发后自动退订）/ `prepend`（插到订阅列表头部）
+- 插件侧 API：`ctx.on`（Unit listener）/ `ctx.once` / `ctx.onVal`（返回 `?JsonValue`）/ `ctx.emit`（通知式）/ `ctx.parallel`（通知式）/ `ctx.serial` / `ctx.bail` / `ctx.waterfall`（请求式，聚合结果返回）
+- `EventRegistry.dispatch(event, args, mode, emitId): ?JsonValue`：emit/parallel 返回 None；serial/bail/waterfall 返回聚合结果
+- bail 值判定（对齐 Cordis `isBailed`）：`JsonValue.Null` 与 `JsonValue.Boolean(false)` 不视为 bail
+
+> v1 只做 `emit`；waterfall/parallel/serial/bail/once/prepend 在 v2 实现（P9）。v2 的 waterfall 是「链式传值」（返回值作为下一订阅者参数），是 Cordis `next` 洋葱回调的跨进程近似——完整 `next` 需要远程回调协议，列为后续增强。
 
 ## 8. 错误处理与边界
 
@@ -177,22 +187,25 @@ public func emit(event: String, args: Array<JsonValue>): Unit {
 | :--- | :--- |
 | `SubscribeParams/Result/EmitParams/DispatchParams` 序列化往返 | 消息类（cordis_core） |
 | `EventRegistryTest` | 订阅/退订/按插件清理/dispatch 遍历（MemoryDuplexTransport 模拟） |
-| `EventRegistryTest` 无订阅者/重复订阅 | 边界 |
-| `PluginContextTest.testOnEmit` | 插件侧 on/emit 全链路（FakeHost） |
-| `EndToEndTest.testEventBus` | **真实双插件进程**：插件 A emit → 宿主路由 → 插件 B 收到并响应 |
+| `EventDispatchModeTest` | **派发模式全量**：emit 广播 / serial bail 短路 / waterfall 链 / parallel 并发 / once 自动退订 / prepend 顺序 |
+| `PluginEventTest` | 插件侧 on/once/onVal/serial/bail/waterfall/parallel 协议往返（FakeHost） |
+| `EndToEndTest.testEventBusEndToEnd` | **真实双插件进程**：插件 A emit → 宿主路由 → 插件 B 收到并响应 |
 | `EndToEndTest.testEventCleanupOnUnload` | 插件卸载后订阅自动清理 |
 
-## 10. 实施步骤（P6-Events）
+## 10. 实施步骤（P6-Events / P9-Events v2）
 
 1. **P6.1**：cordis_core 消息类 + 方法常量 + 单测。
 2. **P6.2**：cordis_host EventRegistry + PluginHost 接入 + 单测（MemoryDuplexTransport）。
 3. **P6.3**：cordis_plugin `ctx.on`/`ctx.emit` + 单测（FakeHost）。
 4. **P6.4**：端到端（真实双插件进程 emit → 订阅者收到；卸载清理）。
-5. 每步遵循 TDD：先写用例 → 实现 → `cjpm test` 通过 → 提交。
+5. **P9.1**：协议扩展（EmitParams/DispatchParams 加 mode、SubscribeParams 加 once/prepend）+ 单测。
+6. **P9.2**：EventRegistry 派发模式（emit/parallel/serial/bail/waterfall）+ `EventDispatchModeTest`。
+7. **P9.3**：插件侧 onVal/once/parallel/serial/bail/waterfall API + FakeHost 协议往返测试。
+8. 每步遵循 TDD：先写用例 → 实现 → `cjpm test` 通过 → 提交。
 
-## 11. 不做的事（v1 范围外）
+## 11. 不做的事（当前范围外）
 
-- waterfall / parallel / serial 派发模式（v2）。
+- 完整 Cordis `next` 洋葱回调 waterfall（跨进程需远程回调协议；当前为链式传值近似）。
 - 事件参数类型安全（保持 `Array<JsonValue>`；后续可参考服务调用的 `invoke<T,R>` 泛型化思路做 `on<T>` 重载）。
 - 跨宿主的分布式事件（单宿主内路由）。
 - 事件持久化/重放。

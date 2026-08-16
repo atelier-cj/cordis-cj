@@ -4,7 +4,7 @@
 > 设计文档：`docs/design.md`（v1.0 草案）、`docs/design-impl.md`（v2.0 实现级）
 > 仓库：https://atomgit.com/ystyle/cordis-cj.git（MIT）
 
-## 总体计划（P0–P7）
+## 总体计划（P0–P9）
 
 | 阶段 | 内容 | 状态 |
 | :--- | :--- | :--- |
@@ -17,6 +17,7 @@
 | P6 | 事件总线：EventRegistry + ctx.on/emit + 端到端 | ✅ 完成 |
 | P7 | @Inject 宏：依赖注入 + ServiceProxy + 异步 handler | ✅ 完成 |
 | P8 | UDS 传输模式：transport 服务参数 + jsonrpc_unix 接线 | ✅ 完成 |
+| P9 | 语义核心（对齐 Cordis）：依赖 Waiting 重试 + 事件 v2 + 依赖变更通知 | ✅ 完成 |
 | — | 收尾：合并 master、README、LICENSE、remote、workspace 依赖简化 | ✅ 完成 |
 
 ## 已完成
@@ -175,9 +176,36 @@
   - `acceptConnection(timeout: Duration)` 是位置参数（无 `!` 后缀），不能命名调用。
   - 属性初始化 `private let udsPath: ?String = None` 不可再赋值 → UDS 模式用 `var`。
 
+### P9 — 语义核心：依赖 Waiting 重试 + 事件 v2 + 依赖变更通知（分支 `feat/semantic-core`）
+
+对齐 Cordis 4.x 语义核心（[docs/cordis-comparison.md](./cordis-comparison.md) §4 第一阶段），三块：
+
+1. **依赖 Waiting 重试**（对齐 Cordis PENDING）：
+   - `InstanceStatus` 加 `Pending`（initialize 依赖缺失时宿主置 Pending，而非 Starting/拒绝）。
+   - 插件侧 `PluginRuntime.start` 握手改为重试循环：`ok=false` 不抛异常退出，保持等待（`waitForDependencyChange` 最长 1s，可被宿主 notify 唤醒）。
+   - 宿主侧 initialize handler：依赖缺失 → `instance.status = Pending` + 返回 `ok=false`（不再日志 "rejected"）。
+   - 测试：`PluginRuntimeTest.testPendingRetryUntilDepsReady`（FakeHost 依赖后置就绪）+ `EndToEndTest.testDependencyWaitingLifecycle`（真实进程：消费者先启动 Pending → 提供者后启动 → 消费者自动 Active）。
+
+2. **事件总线 v2**（对齐 Cordis DispatchMode / once / prepend，docs/design-events.md §7）：
+   - 协议：`EmitParams` 加 `mode`；`DispatchParams` 加 `mode`；`SubscribeParams` 加 `once`/`prepend`；新增 `EventMode` 常量类（emit/parallel/serial/bail/waterfall）。
+   - 宿主 `EventRegistry`：`subscribe(..., once, prepend)` + `dispatch(event, args, mode, emitId): ?JsonValue`——emit 同步广播 / parallel 并发等待 / serial+bail 按序遇 bail 停 / waterfall 链式传值；once 派发后自动退订；prepend 头部插入。`isBailValue` 对齐 Cordis（null/false 非 bail）。
+   - 插件侧 `PluginContext`：`on`（Unit）/ `once` / `onVal`（返回 ?JsonValue，serial/bail/waterfall 用）/ `emit`（通知式）/ `parallel`（通知式）/ `serial` / `bail` / `waterfall`（请求式，宿主聚合返回）；`PluginRuntime` 的 dispatch handler 返回 listener 的 `?JsonValue`。
+   - 测试：`EventDispatchModeTest`（7：emit 广播/serial bail 短路/waterfall 链/parallel 并发/once 自动退订/prepend 顺序，内存双端真实往返）+ `PluginEventTest` 4 个新用例（serial/waterfall/parallel 协议往返 + once/prepend 订阅标记）。
+   - 踩坑：`on` 的 Unit / `?JsonValue` listener 重载 + 带默认参数版本 → lambda 重载歧义（仓颉无法从 lambda 推断返回类型）→ 返回值版命名为 `onVal`，去掉带默认参数的 `on` 重载；宿主侧 request handler 内不能同步 `client.call`（单线程事件循环死锁）→ 插件侧协议往返测试用「预设响应」而非在 handler 内再发请求（真实聚合逻辑由 EventDispatchModeTest 覆盖）。
+
+3. **依赖变更通知**（对齐 Cordis reflect.notify）：
+   - `PluginInstance` 加 `injects`（initialize 握手时记录插件上报的依赖）；`HostState.dependentsOf(key)` 返回依赖该服务的存活实例。
+   - 宿主 `PluginHost.notifyDependents(key, kind, provider)`：`provide` 成功 → `PROVIDER_CHANGED` 通知 Pending 依赖者（唤醒立即重试）；`removePlugin` 服务撤销 → `DEPENDENCY_LOST` 通知依赖者。通知为 fire-and-forget notify 消息。
+   - 插件侧 `handleNotify`：记录 `lastNotify`；`PROVIDER_CHANGED` 置 `dependencyChanged` + `retryCond.notifyAll()` 唤醒等待中的握手循环。
+   - 测试：`PluginRuntimeTest.testNotifyWakeupAcceleratesRetry`（FakeHost 发 PROVIDER_CHANGED → 600ms 内恢复，快于 1s 轮询）+ `EndToEndTest.testDependencyNotificationOnRemove`（提供者移除 → 宿主日志含 "notify dependency-lost add"）。
+
+**全量 87 用例通过**（新增 13）。
+
 ## 待办 / 下一步
 
-- [ ] 事件总线 v2：waterfall/parallel/serial 派发模式、`on<T>` 类型安全重载（v1 已交付 emit 同步广播）
-- [ ] 后续增强：initialize 依赖不满足时插件保持 Waiting 重试（当前直接拒绝）；配置热更新监听
+- [ ] 事件总线 `on<T>` 类型安全重载（当前保持 `Array<JsonValue>`）
+- [ ] 完整 Cordis `next` 洋葱回调 waterfall（跨进程远程回调协议；当前为链式传值近似）
+- [ ] Service 类化（`class X extends Service` 基类）+ Config schema 校验 + 配置热更新（cordis-comparison.md §4 第二阶段）
+- [ ] 服务隔离 `isolate` / 拦截 `intercept` / `accessor` / `mixin` / effect 诊断树（第三阶段增强）
 - [ ] 发布流程（cangjie-publish）：注意宏库带 organization 跨模块消费缺陷——若对外发布宏，评估去 org 或实测中心仓拉取路径
-- [ ] cordis-cj 发版 0.2.0（P8 UDS 模式 + jsonrpc_unix 依赖）
+- [ ] cordis-cj 发版 0.2.0（P8 UDS + P9 语义核心）
