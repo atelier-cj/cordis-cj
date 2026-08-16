@@ -137,6 +137,36 @@ main(): Int64 {
 }
 ```
 
+##### 类模型写法（`Service` 子类，类即服务）
+
+也可以继承 `Service` 基类组织服务：构造时 `super(ctx, name)` 自动注册服务到宿主，`register(method, handler)` 声明方法路由（构造末尾 `bind()` 接入 invoke 分发），业务逻辑集中在类内：
+
+```cangjie
+// 服务类：封装计算服务（提供 add 方法）
+public class CalcService <: Service {
+    public init(ctx: PluginContext) {
+        super(ctx, "calc")                       // 自动 ctx.provide("calc")
+        this.register("add", { args =>           // 方法路由：宿主 invoke calc.add
+            let a = match (args[0]) { case JsonValue.Number(n) => n; case _ => 0.0 }
+            let b = match (args[1]) { case JsonValue.Number(n) => n; case _ => 0.0 }
+            JsonValue.Number(a + b)
+        })
+        this.bind()                              // 构造末尾接入 invoke 分发（仓颉限制）
+    }
+    // 可选：覆写 check() 声明服务可用性（对齐 Cordis [Service.check]）
+    // public override func check(): Bool { /* 连接就绪等 */ true }
+}
+
+main(): Int64 {
+    PluginRuntime.run("my-plugin", [], ["calc"], { ctx =>
+        let svc = CalcService(ctx)               // 构造即完成 provide + 方法注册
+    })
+    return 0
+}
+```
+
+两种写法等价，最终都注册为宿主 `serviceIndex` 中的服务；类模型适合服务方法较多的插件（状态内聚、`check()` 谓词、撤销回调）。
+
 `PluginContext` 提供：`provide` / `dispose` / `registerHandler`（含泛型版）/ `effect`（可逆效果）/ `invoke`（含泛型版）/ `log` / `on` / `emit` / `proxy`。
 
 ### 2. 编写配置（TOML）
