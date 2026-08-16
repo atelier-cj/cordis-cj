@@ -4,7 +4,7 @@
 > 设计文档：`docs/design.md`（v1.0 草案）、`docs/design-impl.md`（v2.0 实现级）
 > 仓库：https://atomgit.com/ystyle/cordis-cj.git（MIT）
 
-## 总体计划（P0–P6）
+## 总体计划（P0–P7）
 
 | 阶段 | 内容 | 状态 |
 | :--- | :--- | :--- |
@@ -15,6 +15,7 @@
 | P4 | 宏层 @Plugin/@Provide + 外部插件示例 | ✅ 完成 |
 | P5 | 泛型类型安全 API：invoke<T,R> / registerHandler<T,R> | ✅ 完成 |
 | P6 | 事件总线：EventRegistry + ctx.on/emit + 端到端 | ✅ 完成 |
+| P7 | @Inject 宏：依赖注入 + ServiceProxy + 异步 handler | ✅ 完成 |
 | — | 收尾：合并 master、README、LICENSE、remote、workspace 依赖简化 | ✅ 完成 |
 
 ## 已完成
@@ -82,6 +83,27 @@
 - **关键修复（演进）**：早期 `setNotificationCallback` 是单回调覆盖语义，log 与 events/emit 需合并处理（独立回调会覆盖）。已给 json-rpc 的 `JsonRpcClient` 增加多回调支持（`setNotificationCallback(cb)` 单覆盖 / `setNotificationCallback(cbs)` 多覆盖 / `addNotificationCallback(cb)` 追加，提交 `5848937`）——cordis 改用 `addNotificationCallback` 独立注册 log 与 events/emit，消除合并脆弱性（提交 `cbb79d2`）。
 - **事件参数**：`Array<JsonValue>`（动态结构，jsonvalue 合法使用）；v2 增强：waterfall/parallel/serial 派发模式、`on<T>` 类型安全重载（见 design-events.md §11 范围外）。
 
+### P7 — @Inject 宏（分支 `feat/inject-macro`，提交 `3e67e69`）
+
+- **`cordis_plugin/src/macros/plugin_macros.cj`**：`@Inject["key"]` 字段宏——`assertParentContext("Plugin")` + `setItem("injectKey"/"injectField")` 上报，字段保持原声明；`@Plugin` 宏收集 inject 列表传给 `PluginRuntime.run`、给类生成 `init(__ctx: PluginContext)` 构造函数为每个 @Inject 字段注入 `ServiceProxy`。
+- **`cordis_plugin/src/service_proxy.cj`**：`ServiceProxy`——封装经宿主 invoke 转发（`call<R>` 泛型返回自动反序列化），@Inject 字段的类型。
+- **`plugin_runtime.cj`**：`PluginContext.proxy(key)` 创建代理。
+- **关键：异步 handler（json-rpc 0.6.0 能力，提交 `85839a9`）**：`JsonRpcServer.registerAsync`——handler 在接收线程调用但约定内部 spawn 异步任务后立即返回，接收线程不阻塞，可处理嵌套请求的响应。解决"handler 内调远程服务（@Inject 代理）的单线程事件循环死锁"。`PluginRuntime` 的 invoke/events-dispatch 改用 `registerAsync`。
+- **宿主 invoke 转发**（`plugin_host.cj`）：消费者发 invoke → 查 serviceIndex 找提供者 → 用提供者连接转发 → 返回结果（@Inject 代理链路的宿主侧路由）。
+- **测试**：`examples/inject_demo` 消费者插件（@Inject["add"]，经代理调用 add 5+6=11）；`EndToEndTest.testInjectMacroEndToEnd`——真实宿主 + 双插件进程（提供者 e2e + 消费者 inject_demo）。**共 62 用例全通过**。
+- **用法**：
+  ```cangjie
+  @Plugin[]
+  public class MyPlugin {
+      @Inject["db"]
+      public var db: ServiceProxy   // 宏注入 ServiceProxy(ctx, "db")
+      @Provide["api"]
+      public func query(args: Array<JsonValue>): JsonValue {
+          return this.db.call<JsonValue>("query", ["SELECT 1"])  // 经宿主 invoke 转发
+      }
+  }
+  ```
+
 ### 收尾（提交 `c9ce254` / `647c1ca` / `584c2d2` / `1e78121` / `89f1e74`）
 
 - **分支合并**：P0–P4 + 泛型分支全部 `--no-ff` 合并回 master，feat 分支已删除。
@@ -138,7 +160,7 @@
 
 ## 待办 / 下一步
 
-- [ ] @Inject 宏（字段 → 代理 getter，经宿主 invoke 转发）——P4 已交付 @Plugin/@Provide 核心，@Inject 后续补
 - [ ] 事件总线 v2：waterfall/parallel/serial 派发模式、`on<T>` 类型安全重载（v1 已交付 emit 同步广播）
 - [ ] 后续增强：initialize 依赖不满足时插件保持 Waiting 重试（当前直接拒绝）；配置热更新监听
 - [ ] 发布流程（cangjie-publish）：注意宏库带 organization 跨模块消费缺陷——若对外发布宏，评估去 org 或实测中心仓拉取路径
+- [ ] json-rpc 0.6.0 发版（registerAsync 异步 handler）
