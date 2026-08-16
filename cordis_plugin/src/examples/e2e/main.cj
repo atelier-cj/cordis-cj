@@ -32,7 +32,7 @@ main(): Int64 {
             case _ => 0
         }
         // 注册 echo 服务实现：原样返回第一个参数
-        ctx.registerHandler("echo", { method, args =>
+        ctx.registerHandler("echo", { _, args =>
             if (args.size > 0) {
                 args[0]
             } else {
@@ -40,7 +40,7 @@ main(): Int64 {
             }
         })
         // 注册 add 服务实现：两个数字相加 + 配置偏移
-        ctx.registerHandler("add", { method, args =>
+        ctx.registerHandler("add", { _, args =>
             let a = match (args[0]) { case JsonValue.Number(n) => n; case _ => 0.0 }
             let b = match (args[1]) { case JsonValue.Number(n) => n; case _ => 0.0 }
             JsonValue.Number(a + b + Float64(offset))
