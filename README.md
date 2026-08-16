@@ -112,6 +112,33 @@ main(): Int64 {
   "jsonvalue" = "1.1.0"
 ```
 
+#### 泛型类型安全 API（推荐）
+
+`registerHandler<T, R>` 与 `invoke<T, R>` 自动完成序列化/反序列化，业务代码直接操作仓颉类型（基础类型或自定义 DTO），省去手动 JsonValue 转换：
+
+```cangjie
+// 自定义 DTO（实现 json.stream 的 JsonSerializable / JsonDeserializable 接口）
+public class AddRequest <: JsonSerializable & JsonDeserializable<AddRequest> {
+    public let a: Int64
+    public let b: Int64
+    public init(a: Int64, b: Int64) { this.a = a; this.b = b }
+    public func toJson(w: JsonWriter): Unit { /* ... */ }
+    public static func fromJson(r: JsonReader): AddRequest { /* ... */ }
+}
+
+main(): Int64 {
+    PluginRuntime.run("my-plugin", [], ["calc"], { ctx =>
+        // 服务端：参数 Array<AddRequest> 自动反序列化，返回 Int64 自动序列化
+        ctx.registerHandler<AddRequest, Int64>("calc", { method, args =>
+            args[0].a + args[0].b
+        })
+    })
+    return 0
+}
+```
+
+`PluginContext` 提供：`provide` / `dispose` / `registerHandler`（含泛型版）/ `effect`（可逆效果）/ `invoke`（含泛型版）/ `log` / `on` / `emit` / `proxy`。
+
 ### 2. 编写配置（TOML）
 
 ```toml
@@ -197,33 +224,6 @@ public var add: ServiceProxy
 | 崩溃检测 | stdout EOF | socket EOF（语义一致，自愈逻辑共用） |
 
 > **为什么帧协议不同**：仓颉 `ConsoleReader.read(Array<Byte>)` 在管道 stdin 下永久阻塞，stdio 只能用 `readln()` + 换行帧；UDS 的 `read` 是标准流式读（EOF 返回 -1/0），可用 jsonrpc 默认的 Content-Length 帧（与 MCP 等标准一致）。详见 [docs/design-impl.md §3.4](docs/design-impl.md)。
-
-## 泛型类型安全 API（推荐）
-
-`registerHandler<T, R>` 与 `invoke<T, R>` 自动完成序列化/反序列化，业务代码直接操作仓颉类型（基础类型或自定义 DTO），省去手动 JsonValue 转换：
-
-```cangjie
-// 自定义 DTO（实现 json.stream 的 JsonSerializable / JsonDeserializable 接口）
-public class AddRequest <: JsonSerializable & JsonDeserializable<AddRequest> {
-    public let a: Int64
-    public let b: Int64
-    public init(a: Int64, b: Int64) { this.a = a; this.b = b }
-    public func toJson(w: JsonWriter): Unit { /* ... */ }
-    public static func fromJson(r: JsonReader): AddRequest { /* ... */ }
-}
-
-main(): Int64 {
-    PluginRuntime.run("my-plugin", [], ["calc"], { ctx =>
-        // 服务端：参数 Array<AddRequest> 自动反序列化，返回 Int64 自动序列化
-        ctx.registerHandler<AddRequest, Int64>("calc", { method, args =>
-            args[0].a + args[0].b
-        })
-    })
-    return 0
-}
-```
-
-`PluginContext` 提供：`provide` / `dispose` / `registerHandler`（含泛型版）/ `effect`（可逆效果）/ `invoke`（含泛型版）/ `log` / `on` / `emit` / `proxy`。
 
 ## 事件总线
 
