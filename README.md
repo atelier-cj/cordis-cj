@@ -308,11 +308,18 @@ let cfg = ConfigLoader.load("cordis.toml")                  // 文件
 | `registerHandler` | `registerHandler(key: String, handler: (String, Array<JsonValue>) -> JsonValue): Unit` | 注册服务实现（JsonValue 版） |
 | `registerHandler<T, R>` | `registerHandler<T, R>(key: String, handler: (String, Array<T>) -> R): Unit` | 泛型版：参数自动反序列化、返回自动序列化 |
 | `effect` | `effect(disposer: () -> Unit): Unit` | 注册可逆效果，卸载时逆序执行（对齐 Cordis `ctx.effect`） |
+| `effectAsync` | `effectAsync(disposer: () -> Future<Unit>, label!: String = "async"): Unit` | 异步可逆效果：disposer 返回 Future，卸载时等待完成 |
 | `invoke` | `invoke(service: String, method: String, args: Array<JsonValue>): JsonValue` | 经宿主转发调用其他插件的服务 |
 | `invoke<T, R>` | `invoke<T, R>(service: String, method: String, args: Array<T>): R` | 泛型版：参数/返回自动转换 |
 | `log` | `log(level: String, message: String): Unit` | 发日志到宿主（`LogLevel.*`） |
 | `on` | `on(event: String, listener: (Array<JsonValue>) -> Unit): String` | 订阅事件（订阅是效果，卸载自动退订） |
+| `on<T>` | `on<T>(event: String, listener: (T) -> Unit): String` | 类型安全订阅：args[0] 自动反序列化为 T |
+| `onVal` | `onVal(event: String, listener: (Array<JsonValue>) -> ?JsonValue): String` | 返回值版订阅（serial/bail 用） |
+| `onWaterfall` | `onWaterfall(event: String, listener: (Array<JsonValue>, () -> ?JsonValue) -> ?JsonValue): String` | 洋葱 next 订阅（对齐 Cordis waterfall，见 design-events.md §7.1） |
 | `emit` | `emit(event: String, args: Array<JsonValue>): Unit` | 发布事件（宿主扇出，不等待订阅者） |
+| `emit<T>` | `emit<T>(event: String, args: Array<T>): Unit` | 类型安全发布：参数自动序列化 |
+| `serial` / `bail` | `serial(event, args): ?JsonValue` | 按序派发，遇 bail 值（非 null/false）停止并返回 |
+| `waterfall` | `waterfall(event: String, args: Array<JsonValue>): ?JsonValue` | 洋葱链派发（最外层订阅者返回值 = 链结果） |
 | `proxy` | `proxy(serviceKey: String): ServiceProxy` | 创建服务代理（@Inject 宏产物） |
 
 #### `ServiceProxy`（远程服务代理）

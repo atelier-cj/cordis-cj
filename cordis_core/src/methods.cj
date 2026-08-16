@@ -18,6 +18,7 @@ public class Methods {
     public static let EVENTS_UNSUBSCRIBE: String = "events/unsubscribe"  // 插件 → 宿主（请求）
     public static let EVENTS_EMIT: String = "events/emit"                // 插件 → 宿主（通知，发布事件）
     public static let EVENTS_DISPATCH: String = "events/dispatch"        // 宿主 → 插件（请求，派发事件）
+    public static let EVENTS_NEXT: String = "events/next"                // 插件 → 宿主（请求，waterfall 链推进）
 
     private init() {}
 }

@@ -19,7 +19,8 @@ public class ServiceRegistry {
     private let services: HashMap<String, () -> Unit> = HashMap<String, () -> Unit>()
     private let serviceOrder: ArrayList<String> = ArrayList<String>()
     // 可逆效果 disposer（无 undo_id），按注册顺序维护：label -> disposer
-    private let effects: ArrayList<(String, () -> Unit)> = ArrayList<(String, () -> Unit)>()
+    // disposer 返回 ?Future<Unit>：None = 同步；Some = 异步（disposeAll 等待完成）
+    private let effects: ArrayList<(String, () -> ?Future<Unit>)> = ArrayList<(String, () -> ?Future<Unit>)>()
     // 服务 Key -> invoke 处理器（宿主转发服务调用时分发）
     private let handlers: HashMap<String, (String, Array<JsonValue>) -> JsonValue> = HashMap<String, (String, Array<JsonValue>) -> JsonValue>()
     private let lock: Mutex = Mutex()
@@ -141,7 +142,22 @@ public class ServiceRegistry {
      */
     public func effect(disposer: () -> Unit, label: String): Unit {
         synchronized(this.lock) {
-            this.effects.add((label, disposer))
+            this.effects.add((label, { => disposer(); None }))
+        }
+    }
+
+    /**
+     * 注册异步可逆效果（docs/cordis-comparison.md §4 async effect，对齐 Cordis async disposer）
+     *
+     * disposer 返回 Future<Unit>（如 spawn 的异步清理任务）；插件卸载时
+     * disposeAll 会等待所有异步 disposer 完成（顺序仍逆序，但异步可并发）。
+     *
+     * @param disposer 撤销回调（返回 Future，卸载时等待完成）
+     * @param label 效果标签
+     */
+    public func effectAsync(disposer: () -> Future<Unit>, label!: String = "async"): Unit {
+        synchronized(this.lock) {
+            this.effects.add((label, { => Some(disposer()) }))
         }
     }
 
@@ -183,33 +199,50 @@ public class ServiceRegistry {
 
     /**
      * 卸载全部：逆序执行所有 disposer（效果 + 服务），然后清空
-     * 对应 Cordis 卸载时逆序撤销效果（docs/design-impl.md §8）
+     * 对应 Cordis 卸载时逆序撤销效果（docs/design-impl.md §8）。
+     * 异步效果（effectAsync）的 Future 会被等待完成。
      */
     public func disposeAll(): Unit {
-        let reversedEffects = ArrayList<() -> Unit>()
+        let reversedEffects = ArrayList<() -> ?Future<Unit>>()
         let reversedServices = ArrayList<() -> Unit>()
         synchronized(this.lock) {
-            // 逆序复制 effects
-            for (i in this.effects.size - 1..0) {
-                reversedEffects.add(this.effects[i][1])
+            // 逆序复制 effects（解构元组取 disposer）
+            // 注意：仓颉 range a..b 仅递增（a<=b），逆序需显式倒序索引
+            let effectCount = this.effects.size
+            var i: Int64 = effectCount - 1
+            while (i >= 0) {
+                let (_, disposer) = this.effects[i]
+                reversedEffects.add(disposer)
+                i--
             }
             // 逆序复制 services
-            for (i in this.serviceOrder.size - 1..0) {
-                let undoId = this.serviceOrder[i]
+            let svcCount = this.serviceOrder.size
+            var j: Int64 = svcCount - 1
+            while (j >= 0) {
+                let undoId = this.serviceOrder[j]
                 if (this.services.contains(undoId)) {
                     reversedServices.add(this.services[undoId])
                 }
+                j--
             }
             this.effects.clear()
             this.services.clear()
             this.serviceOrder.clear()
         }
         // 先效果后服务（效果通常先注册，逆序时后执行）
+        let asyncFutures = ArrayList<Future<Unit>>()
         for (f in reversedEffects) {
-            f()
+            match (f()) {
+                case Some(fut) => asyncFutures.add(fut)
+                case None => ()
+            }
         }
         for (f in reversedServices) {
             f()
+        }
+        // 等待所有异步效果完成
+        for (fut in asyncFutures) {
+            fut.get()
         }
     }
 }

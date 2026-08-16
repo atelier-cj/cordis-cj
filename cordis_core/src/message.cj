@@ -463,12 +463,16 @@ public class DispatchParams <: JsonSerializable & JsonDeserializable<DispatchPar
     public let args: Array<JsonValue>
     public let emitId: String
     public let mode: String
+    // waterfall 模式：订阅者可调用 next 回调推进链（docs/design-events.md §7）
+    public let nextAllowed: Bool
 
-    public init(event: String, args: Array<JsonValue>, emitId: String, mode!: String = EventMode.EMIT) {
+    public init(event: String, args: Array<JsonValue>, emitId: String, mode!: String = EventMode.EMIT,
+                nextAllowed!: Bool = false) {
         this.event = event
         this.args = args
         this.emitId = emitId
         this.mode = mode
+        this.nextAllowed = nextAllowed
     }
 
     public func toJson(w: JsonWriter): Unit {
@@ -477,6 +481,9 @@ public class DispatchParams <: JsonSerializable & JsonDeserializable<DispatchPar
         w.writeName("args").writeValue(this.args)
         w.writeName("emitId").writeValue(this.emitId)
         w.writeName("mode").writeValue(this.mode)
+        if (this.nextAllowed) {
+            w.writeName("nextAllowed").writeValue(true)
+        }
         w.endObject()
     }
 
@@ -486,16 +493,50 @@ public class DispatchParams <: JsonSerializable & JsonDeserializable<DispatchPar
         var args: ?Array<JsonValue> = None
         var emitId: ?String = None
         var mode: String = EventMode.EMIT
+        var nextAllowed: Bool = false
         while (r.peek() != EndObject) {
             match (r.readName()) {
                 case "event" => event = r.readValue<String>()
                 case "args" => args = r.readValue<Array<JsonValue>>()
                 case "emitId" => emitId = r.readValue<String>()
                 case "mode" => mode = r.readValue<String>()
+                case "nextAllowed" => nextAllowed = r.readValue<Bool>()
                 case _ => r.skip()
             }
         }
         r.endObject()
-        DispatchParams(event.getOrThrow(), args.getOrThrow(), emitId.getOrThrow(), mode: mode)
+        DispatchParams(event.getOrThrow(), args.getOrThrow(), emitId.getOrThrow(), mode: mode,
+            nextAllowed: nextAllowed)
+    }
+}
+
+/**
+ * events/next.params（插件 → 宿主，请求）：waterfall 链推进
+ * 订阅者调用 next 回调时携带，宿主推进到下一个订阅者（或最终内置行为）
+ */
+public class NextParams <: JsonSerializable & JsonDeserializable<NextParams> {
+    public let emitId: String
+
+    public init(emitId: String) {
+        this.emitId = emitId
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("emitId").writeValue(this.emitId)
+        w.endObject()
+    }
+
+    public static func fromJson(r: JsonReader): NextParams {
+        r.startObject()
+        var emitId: ?String = None
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "emitId" => emitId = r.readValue<String>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        NextParams(emitId.getOrThrow())
     }
 }

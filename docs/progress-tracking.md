@@ -4,7 +4,7 @@
 > 设计文档：`docs/design.md`（v1.0 草案）、`docs/design-impl.md`（v2.0 实现级）
 > 仓库：https://atomgit.com/ystyle/cordis-cj.git（MIT）
 
-## 总体计划（P0–P11）
+## 总体计划（P0–P13）
 
 | 阶段 | 内容 | 状态 |
 | :--- | :--- | :--- |
@@ -20,6 +20,8 @@
 | P9 | 语义核心（对齐 Cordis）：依赖 Waiting 重试 + 事件 v2 + 依赖变更通知 | ✅ 完成 |
 | P10 | 服务系统完善：配置传递 + Config schema 校验 + Service 类化 + 配置热更新 | ✅ 完成 |
 | P11 | 第三阶段增强：命名 Logger + timer + effect 诊断树 + on<T> 类型安全 | ✅ 完成 |
+| P12 | 类型安全发布 emit<T>/serial<T>/... + async effect（effectAsync） | ✅ 完成 |
+| P13 | 完整 waterfall next 洋葱回调（events/next 跨进程远程回调协议） | ✅ 完成 |
 | — | 收尾：合并 master、README、LICENSE、remote、workspace 依赖简化 | ✅ 完成 |
 
 ## 已完成
@@ -257,10 +259,42 @@
 - 测试：`Phase3ToolsTest.testAutoUdsPathDetection`（parseUdsArg 带/不带 --uds + autoUdsPath 当前进程 None）+ `UdsModeEndToEndTest`（真实宿主拉起，getCommandLine 识别 --uds 全过）。
 - 踩坑：`std.env.getCommandLine()` 文档标注平台差异（Windows 可获取/其他场景可能异常），`autoUdsPath` 用 try-catch 兜底退化为 stdio。
 
+### P12 — 类型安全发布 emit<T> + async effect（分支 `feat/typed-emit-async`）
+
+1. **`ctx.emit<T>/parallel<T>/serial<T>/bail<T>/waterfall<T>`**（`T <: JsonSerializable`）：
+   - 发布侧参数自动序列化（`args |> map { a: T => JsonValue.fromObject(a) } |> collectArray`），与订阅侧 `on<T>` 配套，发布者直接传仓颉类型。
+   - 测试：`Phase3ToolsTest.testEmitTyped`（非泛型 emit + 泛型 emit<T> 对照，事件经宿主扇出）、`testSerialTyped`（请求式 + 聚合结果）。
+2. **async effect（`ctx.effectAsync`）**：
+   - `ServiceRegistry` effects 改存 `(String, () -> ?Future<Unit>)`：`effect(disposer)` 同步包装为 `{ => disposer(); None }`；`effectAsync(disposer, label)` 返回 Future；`disposeAll` 逆序执行并 `fut.get()` 等待异步 disposer 完成。
+   - 顺带修复 P11 遗留 bug：仓颉 range `a..b` 仅递增（a<=b）→ 逆序遍历 effects 用显式 `var i = size-1; while (i >= 0)`（原 for-range 逆序为空循环，disposeAll 从不执行 disposer）；元组取元素需解构 `let (_, disposer)`（`tuple[1]` 触发 IndexOutOfBoundsException）。
+   - 测试：`testAsyncEffectWaitedOnDispose`（同步 + 异步 + 服务三 disposer，200ms 异步被等待，disposeAll 后 snapshot.size == 3 全部执行）。
+3. 踩坑：FakeHost 的 `setNotificationCallback` 是**覆盖语义**（多次 set 互相覆盖）——setupToolsHost 曾有两个 set（EMIT 与 LOG）互相覆盖导致 testEmitTyped 收不到 EMIT 通知，改为合并成一个 callback（`if EVENTS_EMIT {...} else if LOG {...}`）。
+
+**全量 108 用例通过**（新增 3）。
+
+### P13 — 完整 waterfall next 洋葱回调（跨进程远程回调协议，分支 `feat/typed-emit-async`）
+
+- **协议扩展**（`cordis_core`）：
+  - `DispatchParams` 加 `nextAllowed: Bool`（默认 false，仅 true 时序列化）——waterfall 派发时订阅者侧构造 next 回调。
+  - 新方法 `Methods.EVENTS_NEXT` + `NextParams(emitId)`（插件 → 宿主请求，waterfall 链推进）。
+- **宿主侧**（`cordis_host`）：
+  - `EventRegistry`：`chains[emitId] = WaterfallChain(event, targets, args)`（订阅者快照 + 推进索引 + 参数，索引同步推进）；`dispatchWaterfall` 注册链并阻塞在订阅者 0 的 dispatch 响应上，`dispatchNext(emitId)` 推进 index 调下一个订阅者（`callSubscriber(..., nextAllowed: true)`），链结束返回 None（内置行为）。
+  - **递归在响应路径完成**：每个 `next()` 的响应 = 内层链结果，listener 透传/改写后作为自己的派发结果 → `dispatchWaterfall` 的响应即整条链结果（最外层订阅者返回值，对齐 Cordis）。
+  - veto 短路：订阅者返回非 null 值（不调 next）→ 立即返回该值，后续订阅者不再被调用。
+  - `PluginHost` 注册 `events/next` request handler → `eventRegistry.dispatchNext(emitId)`。
+- **插件侧**（`cordis_plugin`）：
+  - listener 内部签名改为 `(Array<JsonValue>, ?(() -> ?JsonValue)) -> ?JsonValue`（next 仅 waterfall 派发时非 None）；on/once/onVal/on<T>/once<T>/onVal<T> 适配忽略 next。
+  - 新 API：`ctx.onWaterfall(event, (args, next) -> ?JsonValue)` + 泛型 `onWaterfall<T>`。
+  - EVENTS_DISPATCH handler：`nextAllowed=true` 时构造 next 闭包（`server.request<NextParams, JsonValue>(EVENTS_NEXT, ...)`，`JsonValue.Null` → None）。
+- **测试**（新增 4，全量 111 通过）：
+  - `EventDispatchModeTest.testWaterfallVetoShortCircuits`（veto 短路，订阅者2 不被调用）
+  - `testWaterfallNextChainsToNext`（next 推进链，结果 = 订阅者2 返回值）
+  - `testWaterfallAllNextReturnsBuiltin`（全部调 next → 内置行为 None）
+  - `PluginEventTest.testOnWaterfallNextRoundTrip`（插件侧 onWaterfall → listener 调 next() → 宿主 events/next 响应 → 结果回宿主）
+- **设计要点**：跨连接无死锁——每次 `callSubscriber` 阻塞"发起方"连接线程，响应由"目标订阅者"连接线程处理；插件侧 `registerAsync` + spawn 保证接收线程不被 listener 阻塞。详见 `docs/design-events.md §7.1`。
+
 ## 待办 / 下一步
 
-- [ ] 完整 Cordis `next` 洋葱回调 waterfall（跨进程远程回调协议；当前为链式传值近似）
-- [ ] `on<T>` emit 侧类型安全（当前 `on<T>` 订阅已实现，emit<T> 发布待做）
 - [ ] Fiber 状态机完善：`await()/restart()/update()` 语义（当前崩溃自愈 + 配置热更新重启已覆盖主路径）
 - [ ] 发布流程（cangjie-publish）：注意宏库带 organization 跨模块消费缺陷——若对外发布宏，评估去 org 或实测中心仓拉取路径
-- [ ] cordis-cj 发版 0.2.0（P8 UDS + P9 语义核心 + P10 服务系统 + P11 增强）
+- [ ] cordis-cj 发版 0.2.0（P8 UDS + P9 语义核心 + P10 服务系统 + P11 增强 + P12/P13）（中心仓 gjson 1.2.1 同步问题待恢复后继续）

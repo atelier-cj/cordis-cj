@@ -207,6 +207,25 @@ public class PluginHost {
             }
         })
 
+        // 插件 → 宿主：events/next 请求（waterfall 洋葱 next 推进，docs/design-events.md §7）
+        // 订阅者调用 next() 时发送；宿主推进链到下一订阅者并返回其结果
+        client.registerRequestHandler(Methods.EVENTS_NEXT, { req =>
+            match (req.params) {
+                case Some(p) =>
+                    try {
+                        let params = JsonValue.toObject<NextParams>(p)
+                        match (this.eventRegistry.dispatchNext(params.emitId)) {
+                            case Some(v) => Some(v)
+                            case None => Some(JsonValue.Null)
+                        }
+                    } catch (e: Exception) {
+                        this.logger(providerId, "events/next error: ${e.message}")
+                        Some(JsonValue.Null)
+                    }
+                case None => Some(JsonValue.Null)
+            }
+        })
+
         // 插件 → 宿主：invoke 服务调用转发（@Inject 代理链路）
         // 消费者发 invoke → 查 serviceIndex 找提供者 → 用提供者连接转发 → 返回结果
         client.registerRequestHandler(Methods.INVOKE, { req =>
