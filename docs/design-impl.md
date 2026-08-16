@@ -189,6 +189,7 @@ public struct PluginEntry {
 ```cangjie
 public enum InstanceStatus {
     | Starting       // 已 launch，等待 initialize 握手
+    | Pending        // initialize 依赖缺失，保持等待重试（对齐 Cordis PENDING）
     | Active         // 握手完成，服务已注册
     | Unloading      // dispose 流程中
     | Failed         // 启动失败/崩溃
@@ -201,6 +202,11 @@ public class PluginInstance {
     public var client: JsonRpcClient        // 宿主 → 插件 RPC 连接
     public var status: InstanceStatus
     public var provides: HashMap<String, String>   // serviceKey -> undo_id（本插件提供）
+    public var injects: ArrayList<String>          // 插件上报的依赖（握手时记录）
+    public let settleLock: Mutex            // 状态转换同步（Fiber 状态机）
+    public let settleCond: Condition        // awaitActive 等待状态变化
+    public let terminateLock: Mutex         // 终止互斥（防并发重复杀进程）
+    public var error: ?String               // 启动失败/崩溃原因（对齐 Cordis Fiber._error）
 
     public init(entry: PluginEntry, process: SubProcess, client: JsonRpcClient) {
         this.entry = entry
@@ -211,6 +217,15 @@ public class PluginInstance {
     }
 }
 ```
+
+**Fiber 状态机**（P14，对齐 Cordis Fiber 的 await/restart/update 语义，docs/cordis-comparison.md §4）：
+
+- **`transitionStatus(instance, newStatus, error?)`**（PluginHost 私有）：状态转换统一入口——更新状态 + 唤醒 awaitActive 等待者 + 通知 `onStatusChange` 监听器（对齐 Cordis `internal/status` 事件）。所有状态变更必须经此方法。
+- **`awaitActive(id, timeout)`**：阻塞等待插件 Active **且其 provide 服务全部注册**（Active 是握手完成，服务注册在其后）。进程死亡 → 标记 Failed 并返回错误（对齐 Cordis `await()` 重抛启动错误）；Pending（依赖缺失）继续等待；超时返回 Err。
+- **`restartPlugin(id)`**：终止当前进程 → 用当前 desired entry（无 desired 时用 instance.entry）重新拉起 → awaitActive（对齐 Cordis `restart()`）。
+- **`updatePlugin(id, newEntry)`**：校验新 config（schema，失败不重启）→ 更新 desired/实例 entry → restart → awaitActive（对齐 Cordis `update(config)`）。
+- **`onStatusChange(listener)`**：注册状态转换监听（(pluginId, old, new)，对齐 Cordis `internal/status` 事件）。
+- reconcile 的配置热更新路径复用 `updatePlugin`；崩溃自愈先标记 Failed 再重启。
 
 ### 2.3 宿主全局状态
 
