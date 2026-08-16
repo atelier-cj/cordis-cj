@@ -256,6 +256,124 @@ let cfg = ConfigLoader.parseJsonString<CordisConfig>(jsonStr)  // JSON
 let cfg = ConfigLoader.load("cordis.toml")                  // 文件
 ```
 
+## API 参考
+
+### 插件侧（`ystyle::cordis_plugin`）
+
+#### `PluginRuntime`（插件入口）
+
+| 方法 | 签名 | 说明 |
+| :--- | :--- | :--- |
+| `run` | `static run(pluginId: String, inject: Array<String>, provide: Array<String>, handler: (PluginContext) -> Unit)` | stdio 模式入口（换行帧） |
+| `run` | `static run(transport: Transport, pluginId: String, inject: Array<String>, provide: Array<String>, handler: (PluginContext) -> Unit)` | 自定义传输层（测试/特殊场景） |
+| `runUds` | `static runUds(udsPath: String, pluginId: String, inject: Array<String>, provide: Array<String>, handler: (PluginContext) -> Unit)` | UDS 模式入口（Content-Length 帧） |
+| `parseUdsArg` | `static parseUdsArg(args: Array<String>): ?String` | 解析 `--uds <path>`，未指定返回 None |
+
+#### `PluginContext`（插件业务上下文，`ctx`）
+
+| 方法 | 签名 | 说明 |
+| :--- | :--- | :--- |
+| `provide` | `provide(key: String): String` | 提供服务到宿主，返回 `undo_id` |
+| `provide` | `provide(key: String, disposer: () -> Unit): String` | 提供服务 + 撤销回调 |
+| `dispose` | `dispose(undoId: String): Bool` | 撤销指定服务 |
+| `registerHandler` | `registerHandler(key: String, handler: (String, Array<JsonValue>) -> JsonValue): Unit` | 注册服务实现（JsonValue 版） |
+| `registerHandler<T, R>` | `registerHandler<T, R>(key: String, handler: (String, Array<T>) -> R): Unit` | 泛型版：参数自动反序列化、返回自动序列化 |
+| `effect` | `effect(disposer: () -> Unit): Unit` | 注册可逆效果，卸载时逆序执行（对齐 Cordis `ctx.effect`） |
+| `invoke` | `invoke(service: String, method: String, args: Array<JsonValue>): JsonValue` | 经宿主转发调用其他插件的服务 |
+| `invoke<T, R>` | `invoke<T, R>(service: String, method: String, args: Array<T>): R` | 泛型版：参数/返回自动转换 |
+| `log` | `log(level: String, message: String): Unit` | 发日志到宿主（`LogLevel.*`） |
+| `on` | `on(event: String, listener: (Array<JsonValue>) -> Unit): String` | 订阅事件（订阅是效果，卸载自动退订） |
+| `emit` | `emit(event: String, args: Array<JsonValue>): Unit` | 发布事件（宿主扇出，不等待订阅者） |
+| `proxy` | `proxy(serviceKey: String): ServiceProxy` | 创建服务代理（@Inject 宏产物） |
+
+#### `ServiceProxy`（远程服务代理）
+
+| 方法 | 签名 | 说明 |
+| :--- | :--- | :--- |
+| `call<R>` | `call<R>(method: String, args: Array<JsonValue>): R where R <: JsonDeserializable<R>` | 调用远程服务（`R = JsonValue` 时原样返回） |
+
+#### `ServiceRegistry`（服务注册表，插件内部）
+
+| 方法 | 签名 | 说明 |
+| :--- | :--- | :--- |
+| `register` | `register(undoId: String)` / `register(undoId: String, disposer: () -> Unit)` | 登记服务 |
+| `dispose` | `dispose(undoId: String): Bool` | 按 undo_id 撤销服务 |
+| `effect` | `effect(disposer: () -> Unit): Unit` | 注册可逆效果 |
+| `disposeAll` | `disposeAll(): Unit` | 卸载时逆序执行全部 disposer 并清空 |
+| `invokeHandler` | `invokeHandler(service: String, method: String, args: Array<JsonValue>): JsonValue` | 分发宿主转发的调用 |
+| `serviceCount` / `effectCount` | `prop ... : Int64` | 诊断用 |
+
+### 宿主侧（`ystyle::cordis_host`）
+
+#### `PluginManager`（进程管理）
+
+| 方法 | 签名 | 说明 |
+| :--- | :--- | :--- |
+| `init` | `init()` | stdio 模式（默认） |
+| `init` | `init(udsPath: String)` / `init(udsPath: String, logger: (String, String) -> Unit)` | UDS 模式：宿主 bind `uds_path` 监听 |
+| `launch` | `launch(entry: PluginEntry): PluginInstance` | 拉起插件进程并建连（uds 模式自动追加 `--uds <path>` 参数 + accept） |
+| `terminate` | `terminate(instance: PluginInstance): Int64` | 热卸载：关连接 → 强杀 → 回收退出码 |
+| `isExited` | `isExited(instance: PluginInstance): Bool` | 探测连接是否关闭（崩溃检测信号源） |
+| `close` | `close(): Unit` | 关闭 UDS 监听（stdio 无操作） |
+| `isUdsMode` | `prop isUdsMode: Bool` | 是否 UDS 模式 |
+
+#### `PluginHost`（协调器）
+
+| 方法 | 签名 | 说明 |
+| :--- | :--- | :--- |
+| `init` | `init(manager: PluginManager, logger?: (String, String) -> Unit)` | 构造（注入 PluginManager） |
+| `launchPlugin` | `launchPlugin(entry: PluginEntry): PluginInstance` | 拉起插件并注册宿主侧 RPC 处理器 |
+| `reconcile` | `reconcile(configPath: String): Unit` | 读 TOML → diff → 拓扑启动 → 崩溃自愈 |
+| `reconcileDesired` | `reconcileDesired(): Unit` | 对当前 desired 执行一轮调谐 |
+| `removePlugin` | `removePlugin(id: String): Unit` | 终止插件并清理服务注册表 |
+| `state` / `eventRegistry` | `prop` | `HostState` / `EventRegistry`（公共字段） |
+
+#### `HostState`（状态）
+
+`desired` / `actual` / `serviceIndex`（serviceKey → providerId）/ `undoMap`（undoId → (key, providerId)），方法：`addDesired` / `removeDesired` / `addInstance` / `removeInstance` / `getInstance(id)` / `hasService(key)` / `registerService` / `unregisterService` / `clearServicesByProvider` / `servicesOf(providerId)`。
+
+#### `EventRegistry`（事件注册表）
+
+`subscribe(event, pluginId, instance): String` / `unsubscribe(subscriptionId): Bool` / `unsubscribeAll(pluginId)` / `subscriberCount(event): Int64` / `dispatch(event, args, emitId): Int64`（同步按注册顺序派发，失败自动清理订阅）。
+
+### 核心类型（`ystyle::cordis_core`）
+
+#### `CordisConfig`（根配置，`Serializable<T>`）
+
+| 字段 | 类型 | 默认 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `interval` | `Int64` | `5` | 调谐周期（秒） |
+| `pingInterval` | `Int64` | `30` | 探活周期（秒） |
+| `transport` | `String` | `"stdio"` | `"stdio"` / `"uds"` |
+| `udsPath` | `String` | `""` | UDS 监听 socket 路径 |
+| `entries` | `ArrayList<PluginEntry>` | — | 插件期望状态列表 |
+
+#### `PluginEntry`（插件条目）
+
+`id` / `source`（可执行文件路径）/ `args`（附加参数）/ `inject`（依赖服务 Key）/ `provide`（提供服务 Key）/ `config`（DataModel 私有配置透传）/ `enabled`（默认 true）。
+
+#### `ConfigLoader`（统一配置加载）
+
+`loadToml<T>(path)` / `parseTomlString<T>(str)` / `parseJsonString<T>(str)`（泛型，`T <: Serializable<T>`）/ `load(path): CordisConfig` / `parseString(str): CordisConfig`。
+
+#### `InstanceStatus`
+
+`Starting` / `Active` / `Unloading` / `Failed` / `Unreachable`（`@Derive[Equatable, ToString]`）。
+
+#### 常量
+
+`Methods.*`：`INITIALIZE` / `INITIALIZED` / `PROVIDE` / `DISPOSE` / `NOTIFY` / `LOG` / `INVOKE` / `PING` / `PONG` / `EVENTS_SUBSCRIBE` / `EVENTS_UNSUBSCRIBE` / `EVENTS_EMIT` / `EVENTS_DISPATCH`；`NotifyKind.*`：`DEPENDENCY_LOST` / `PROVIDER_CHANGED`；`LogLevel.*`：`TRACE` / `DEBUG` / `INFO` / `WARN` / `ERROR`。
+
+### 宏（`ystyle::cordis_plugin.macros`）
+
+| 宏 | 用法 | 说明 |
+| :--- | :--- | :--- |
+| `@Plugin[]` | 标注插件类 | 自动生成 `main` + 握手 + 服务注册 + invoke 路由 |
+| `@Provide["key"]` | 标注服务方法 `func f(args: Array<JsonValue>): JsonValue` | 声明提供服务，注册到宿主 |
+| `@Inject["key"]` | 标注字段 `var f: ServiceProxy` | 声明依赖注入，宏生成 `ServiceProxy(ctx, "key")` |
+
+> 宏包与调用方需**同模块**；跨模块消费带 organization 的宏库有 cjpm 缺陷（见 [docs/macro-org-dependency-issue.md](docs/macro-org-dependency-issue.md)），外部插件建议用显式 API 写法。
+
 ## 测试
 
 ```shell
