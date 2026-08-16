@@ -712,7 +712,7 @@ public class PluginRuntime {
 
     private func registerHandlers(): Unit {
         // initialized：宿主确认依赖满足，允许开始工作（通知，无响应）
-        this.server.register(Methods.INITIALIZED, { ctx => HandlerResult.ok(JsonValue.Boolean(true)) })
+        this.server.register(Methods.INITIALIZED, { _ => HandlerResult.ok(JsonValue.Boolean(true)) })
         // dispose：宿主请求撤销指定服务
         this.server.register(Methods.DISPOSE, { ctx => this.handleDispose(ctx) })
         // notify：宿主广播依赖图变化
@@ -889,6 +889,7 @@ public class PluginRuntime {
                 this.server.request<UnsubscribeParams, JsonValue>(
                     Methods.EVENTS_UNSUBSCRIBE,
                     params: UnsubscribeParams(subscriptionId))
+                ()
             } catch (e: Exception) {
                 ()
             }

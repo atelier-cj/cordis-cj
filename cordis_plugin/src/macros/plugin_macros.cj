@@ -81,7 +81,7 @@ public macro Provide(attr: Tokens, input: Tokens): Tokens {
  *        ctx.registerHandler(key, { method, args => __plugin.方法(args) })
  *    })
  */
-public macro Plugin(attr: Tokens, input: Tokens): Tokens {
+public macro Plugin(_: Tokens, input: Tokens): Tokens {
     let classDecl = ClassDecl(input)
     let className = classDecl.identifier.value
     let classNameToken = Token(TokenKind.IDENTIFIER, className)
@@ -156,7 +156,7 @@ public macro Plugin(attr: Tokens, input: Tokens): Tokens {
         let methodName = msg.getString("methodName")
         let methodToken = Token(TokenKind.IDENTIFIER, methodName)
         registrations = registrations + quote(
-            ctx.registerHandler($(serviceKey), { method, args => __plugin.$(methodToken)(args) })
+            ctx.registerHandler($(serviceKey), { _, args => __plugin.$(methodToken)(args) })
         )
     }
 

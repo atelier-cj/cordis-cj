@@ -17,8 +17,18 @@ public class InjectDemo {
 
     @Provide["calc"]
     public func calc(args: Array<JsonValue>): JsonValue {
-        // 通过代理调用远程 add 服务（宿主 invoke 转发）
-        let result = this.add.call<JsonValue>("add", [JsonValue.Number(5.0), JsonValue.Number(6.0)])
+        // 通过代理调用远程 add 服务（宿主 invoke 转发）；args 透传，缺省 5+6
+        let a = if (args.size > 0) {
+            match (args[0]) { case JsonValue.Number(n) => n; case _ => 5.0 }
+        } else {
+            5.0
+        }
+        let b = if (args.size > 1) {
+            match (args[1]) { case JsonValue.Number(n) => n; case _ => 6.0 }
+        } else {
+            6.0
+        }
+        let result = this.add.call<JsonValue>("add", [JsonValue.Number(a), JsonValue.Number(b)])
         match (result) {
             case JsonValue.Number(n) => JsonValue.Number(n)
             case _ => JsonValue.Null
