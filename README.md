@@ -87,6 +87,8 @@ public class MyPlugin {
 # cordis.toml
 interval = 5          # 调谐周期（秒）
 ping_interval = 30    # 探活周期（秒）
+transport = "stdio"   # 传输模式："stdio"（管道，默认）| "uds"（Unix Domain Socket）
+uds_path = ""         # UDS 模式下的监听 socket 路径（如 "/tmp/cordis.sock"）
 
 [[plugins]]
 id = "my-plugin"
@@ -104,7 +106,13 @@ enabled = true
 import ystyle::cordis_host.*
 
 main() {
-    let manager = PluginManager()
+    let cfg = ConfigLoader.load("cordis.toml")
+    // 按服务参数选择传输模式：uds → PluginManager(uds_path)；默认 stdio → PluginManager()
+    let manager = if (cfg.transport == "uds") {
+        PluginManager(cfg.udsPath)
+    } else {
+        PluginManager()
+    }
     let host = PluginHost(manager)
     // 启动调谐循环（spawn 后台线程，每 interval 秒一轮）
     spawn {
@@ -119,6 +127,8 @@ main() {
 ```
 
 宿主会自动：拉起插件 → 握手 → 依赖拓扑排序 → 崩溃自愈重启 → 配置变更热调整。
+
+> **UDS 模式**（`transport = "uds"`）：宿主 bind `uds_path` 监听，插件经 `--uds <path>` 参数连接上来（`PluginRuntime.runUds` / `parseUdsArg` 自动识别），帧协议为标准的 Content-Length。UDS 仅支持 Linux/macOS；stdio 模式保持全平台。
 
 ### 4. 服务调用（invoke 转发）
 
@@ -197,11 +207,13 @@ main(): Int64 {
 
 ## 协议
 
-- **传输**：插件 stdin/stdout 管道，换行分隔帧（`NewlineFraming`）
+- **传输**：两种模式由 `CordisConfig.transport` 服务参数切换
+  - `stdio`（默认）：插件 stdin/stdout 管道，换行分隔帧（`NewlineFraming`）
+  - `uds`：Unix Domain Socket，标准 Content-Length 帧（`jsonrpc_unix`）
 - **消息**：JSON-RPC 2.0
-- **方法**：`initialize` / `initialized` / `provide` / `dispose` / `notify` / `log` / `invoke` / `ping`
+- **方法**：`initialize` / `initialized` / `provide` / `dispose` / `notify` / `log` / `invoke` / `ping` / `events/*`
 
-> 设计初稿为 Content-Length 帧（LSP 风格），因仓颉 `ConsoleReader.read(Array<Byte>)` 在管道 stdin 下永久阻塞而改用换行帧（与 mcp-cj 生产方案一致），详见 [docs/progress-tracking.md](docs/progress-tracking.md)。
+> 设计初稿为 Content-Length 帧（LSP 风格），因仓颉 `ConsoleReader.read(Array<Byte>)` 在管道 stdin 下永久阻塞而改用换行帧（与 mcp-cj 生产方案一致）；UDS 传输的 `read` 是标准流式读，无此坑，可直接用 Content-Length 帧，详见 [docs/progress-tracking.md](docs/progress-tracking.md)。
 
 ## 配置加载（统一 TOML/JSON）
 
@@ -220,7 +232,7 @@ eval "$(cjvs env zsh)" && eval "$(cjvs stdx-env zsh)"
 cjpm test -j 16 --no-progress
 ```
 
-44 个用例，覆盖：协议序列化往返、配置解析、管道传输（真实子进程）、进程管理、插件运行时（内存双端对接）、端到端（真实宿主 ↔ 真实插件进程：握手/服务注册/invoke/热卸载/崩溃自愈）、宏插件生命周期、独立模块外部插件生命周期、泛型 invoke/registerHandler 全链路。
+72 个用例，覆盖：协议序列化往返、配置解析（含 UDS 服务参数）、管道传输（真实子进程）、UDS 传输回环、进程管理、插件运行时（内存双端对接）、端到端（stdio + UDS 双模式真实宿主 ↔ 真实插件进程：握手/服务注册/invoke/热卸载/崩溃自愈）、宏插件生命周期、独立模块外部插件生命周期、泛型 invoke/registerHandler 全链路、事件总线。
 
 ## 文档
 

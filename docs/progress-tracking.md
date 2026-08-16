@@ -16,6 +16,7 @@
 | P5 | 泛型类型安全 API：invoke<T,R> / registerHandler<T,R> | ✅ 完成 |
 | P6 | 事件总线：EventRegistry + ctx.on/emit + 端到端 | ✅ 完成 |
 | P7 | @Inject 宏：依赖注入 + ServiceProxy + 异步 handler | ✅ 完成 |
+| P8 | UDS 传输模式：transport 服务参数 + jsonrpc_unix 接线 | ✅ 完成 |
 | — | 收尾：合并 master、README、LICENSE、remote、workspace 依赖简化 | ✅ 完成 |
 
 ## 已完成
@@ -158,9 +159,25 @@
   - spawn 内捕获可变局部变量会报错 → 结果收集放进共享对象（如 FakeHost）的方法调用。
   - `JsonValue` 的 map 赋值（`reqJson["a"] = ...`）不支持 → 先构造 `HashMap<String, JsonValue>` 再转 `JsonValue.Map`。
 
+### P8 — UDS 传输模式（分支 `feat/uds-transport`）
+
+- **`jsonrpc_unix` 现成复用**：json-rpc 仓库已发布 `ystyle::jsonrpc_unix` 0.6.0（UnixServerTransport / UnixClientTransport / UnixConnectionTransport），cordis 只接线不改传输实现。
+- **`cordis_core/src/config.cj`**：`CordisConfig` 加 `transport`（"stdio"/"uds"，默认 "stdio"）+ `uds_path` 字段（TOML/JSON 双格式序列化）。
+- **`cordis_host/src/plugin_manager.cj`**：`PluginManager(udsPath)` 进入 UDS 模式——`launch` 分支：bind `uds_path`（bind 前 `removeIfExists` 清理残留）→ spawn 插件（argv 追加 `--uds <path>`）→ `acceptConnection(10s)` → `JsonRpcClient(ContentLengthFraming)`；新增 `close()` 关闭监听；`terminate`/`isExited`/`forwardStderr` 与 stdio 模式共用。
+- **`cordis_plugin/src/plugin_runtime.cj`**：新增 `runUds(udsPath, ...)`（UnixClientTransport + ContentLengthFraming）与 `parseUdsArg(args)`（解析 `--uds <path>`）；e2e 示例插件 main 支持两种模式自动切换。
+- **测试**（新增 10 用例，全量 72 通过）：
+  - `UdsTransportTest`（5）：回环 echo、生命周期（EOF→isClosed）、多连接、server 关闭拒绝新连接、残留 socket 清理。
+  - `ConfigLoaderTest`（2 新）：TOML uds 模式解析、serialize 往返。
+  - `UdsModeEndToEndTest`（3）：真实宿主 + 真实插件进程全流程（握手/服务注册/invoke/热卸载）、reconcile 从配置（transport=uds）拉起、崩溃自愈（socket EOF 检测重启）。
+- **踩坑（P8）**：
+  - `std.fs.remove(Path)` 在文件不存在时抛 FSException → 用 `removeIfExists`。
+  - `UnixConnectionTransport.isClosed()` 只反映本端显式关闭；对端关闭需先 `receive()` 感知 EOF（与管道语义一致）。
+  - `acceptConnection(timeout: Duration)` 是位置参数（无 `!` 后缀），不能命名调用。
+  - 属性初始化 `private let udsPath: ?String = None` 不可再赋值 → UDS 模式用 `var`。
+
 ## 待办 / 下一步
 
 - [ ] 事件总线 v2：waterfall/parallel/serial 派发模式、`on<T>` 类型安全重载（v1 已交付 emit 同步广播）
 - [ ] 后续增强：initialize 依赖不满足时插件保持 Waiting 重试（当前直接拒绝）；配置热更新监听
 - [ ] 发布流程（cangjie-publish）：注意宏库带 organization 跨模块消费缺陷——若对外发布宏，评估去 org 或实测中心仓拉取路径
-- [ ] json-rpc 0.6.0 发版（registerAsync 异步 handler）
+- [ ] cordis-cj 发版 0.2.0（P8 UDS 模式 + jsonrpc_unix 依赖）

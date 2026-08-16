@@ -2,6 +2,7 @@ package ystyle::cordis_plugin
 
 import ystyle::cordis_core.*
 import ystyle::jsonrpc.*
+import ystyle::jsonrpc_unix.UnixClientTransport
 import jsonvalue.*
 import stdx.encoding.json.stream.{JsonSerializable, JsonDeserializable}
 import std.collection.{HashMap, map, collectArray}
@@ -199,6 +200,42 @@ public class PluginRuntime {
         let server = JsonRpcServer(transport, framing: NewlineFraming())
         let runtime = PluginRuntime(server, pluginId)
         runtime.start(inject, provide, handler)
+    }
+
+    /**
+     * 以 UDS（Unix Domain Socket）为传输层启动（插件 main 的 UDS 入口）
+     *
+     * 宿主以 uds 模式拉起插件时通过命令行参数传入监听地址
+     * （--uds <path>，见 parseUdsArg）。插件 connect 到该地址后与宿主
+     * JSON-RPC 通信，使用 ContentLengthFraming（与宿主侧 launchUds 一致）。
+     *
+     * @param udsPath 宿主监听的 Unix Domain Socket 路径
+     * @param pluginId 插件唯一 ID
+     * @param inject 依赖的服务 Key 列表
+     * @param provide 提供的服务 Key 列表
+     * @param handler 插件业务逻辑（握手与服务注册完成后调用）
+     */
+    public static func runUds(udsPath: String, pluginId: String, inject: Array<String>,
+                              provide: Array<String>, handler: (PluginContext) -> Unit): Unit {
+        let transport = UnixClientTransport(udsPath)
+        let server = JsonRpcServer(transport, framing: ContentLengthFraming())
+        let runtime = PluginRuntime(server, pluginId)
+        runtime.start(inject, provide, handler)
+    }
+
+    /**
+     * 从命令行参数解析 UDS 地址（--uds <path>）
+     * @return Some(path) 找到 --uds 参数；None 未指定（默认 stdio 模式）
+     */
+    public static func parseUdsArg(args: Array<String>): ?String {
+        var i: Int64 = 0
+        while (i < args.size - 1) {
+            if (args[i] == "--uds") {
+                return Some(args[i + 1])
+            }
+            i++
+        }
+        None
     }
 
     private init(server: JsonRpcServer, pluginId: String) {
