@@ -4,7 +4,7 @@
 > 设计文档：`docs/design.md`（v1.0 草案）、`docs/design-impl.md`（v2.0 实现级）
 > 仓库：https://atomgit.com/ystyle/cordis-cj.git（MIT）
 
-## 总体计划（P0–P9）
+## 总体计划（P0–P10）
 
 | 阶段 | 内容 | 状态 |
 | :--- | :--- | :--- |
@@ -18,6 +18,7 @@
 | P7 | @Inject 宏：依赖注入 + ServiceProxy + 异步 handler | ✅ 完成 |
 | P8 | UDS 传输模式：transport 服务参数 + jsonrpc_unix 接线 | ✅ 完成 |
 | P9 | 语义核心（对齐 Cordis）：依赖 Waiting 重试 + 事件 v2 + 依赖变更通知 | ✅ 完成 |
+| P10 | 服务系统完善：配置传递 + Config schema 校验 + Service 类化 + 配置热更新 | ✅ 完成 |
 | — | 收尾：合并 master、README、LICENSE、remote、workspace 依赖简化 | ✅ 完成 |
 
 ## 已完成
@@ -201,11 +202,38 @@
 
 **全量 87 用例通过**（新增 13）。
 
+### P10 — 服务系统完善：配置传递 + Config schema + Service 类化 + 配置热更新（分支 `feat/service-phase2`）
+
+1. **配置传递**（热更新前置）：
+   - `InitializeResult` 加 `config: ?JsonValue`（宿主下发 `entry.config`，DataModel→JsonValue）。
+   - 插件侧 `PluginRuntime.pluginConfig` + `PluginContext.config` 属性（`cfg.toDataModel()` 转回 DataModel）。
+   - 测试：`PluginRuntimeTest.testConfigPassedToPlugin`（FakeHost 下发 host/port → 插件读到）。
+   - 踩坑：`DataModel.fromJson`（stdx）与 jsonvalue 的 `JsonValue` 是**不同类型**（stdx class vs jsonvalue enum）→ 用 jsonvalue 包自带的 `JsonValue.toDataModel()`（jsonvalue.cj 已实现）避免跨包转换；`stdx.encoding.json.*` 与 `jsonvalue.*` 同时 import 会 JsonValue 冲突。
+
+2. **Config schema 校验**（`cordis_core/src/config_schema.cj`）：
+   - `ConfigFieldSpec`（name/typeName/required）+ `ConfigSchema`：`validate`（宽松）/ `validateStrict`（含未知字段检查）；类型 string/bool/int/float/array/object；错误路径化（如 `plugins[0].config.port: expected int, got string`）。
+   - `PluginHost.registerSchema(pluginId, schema)` + `launchPlugin` 前置校验（失败抛异常，reconcile 捕获记录日志）。
+   - 测试：`ConfigSchemaTest`（7 用例：合法通过/缺必填/类型不匹配/未知字段严格模式/空配置/int 接受整值 float/宿主拒绝非法配置）。
+   - 踩坑：`type` 是仓颉关键字 → 字段名 `typeName`；`DataModelStruct.get(name)` 返回 DataModel 非 Option（缺失为 DataModelNull）→ 用 `is DataModelNull` 判断。
+
+3. **Service 类化**（`cordis_plugin/src/service.cj`，对齐 Cordis `Service`）：
+   - `Service` 抽象基类：构造 `super(ctx, name)` 自动 `ctx.provide`；`register(method, handler)` 方法路由；`bind()` 构造末尾接入 invoke 分发；`check()` 可用性谓词（可覆写）。
+   - **仓颉限制**：可继承类的构造函数不能捕获 `this` → registerHandler 闭包移到 `bind()`（对齐 Cordis `[Service.init]` 构造后钩子）；可覆写方法需 `open`。
+   - 测试：`ServiceClassTest`（2 用例：自动注册+invoke 往返、check 谓词）。
+   - 踩坑：构造参数默认值需 `!` 后缀（`ready!: Bool = true`）；子类成员变量需在构造最前初始化（`register` 前）。
+
+4. **配置热更新**（e2e）：
+   - `entryChanged` 已比较 config（DataModel stringify）→ `computeToUpdate` → 重启插件；配置传递打通后热更新真正生效。
+   - e2e 插件加 `config.offset`（add 结果加偏移）；测试：`EndToEndTest.testConfigHotReload`（offset 10→100，add 结果 15→105）。
+   - 踩坑：`cjpm test` 只编译测试目标，**插件二进制需 `cjpm build` 重建**才生效（修改 examples 后直接跑测试会得到旧二进制行为）。
+
+**全量 98 用例通过**（新增 11）。
+
 ## 待办 / 下一步
 
 - [ ] 事件总线 `on<T>` 类型安全重载（当前保持 `Array<JsonValue>`）
 - [ ] 完整 Cordis `next` 洋葱回调 waterfall（跨进程远程回调协议；当前为链式传值近似）
-- [ ] Service 类化（`class X extends Service` 基类）+ Config schema 校验 + 配置热更新（cordis-comparison.md §4 第二阶段）
-- [ ] 服务隔离 `isolate` / 拦截 `intercept` / `accessor` / `mixin` / effect 诊断树（第三阶段增强）
+- [ ] 服务隔离 `isolate` / 拦截 `intercept` / `accessor` / `mixin` / effect 诊断树（cordis-comparison.md §4 第三阶段）
+- [ ] Fiber 状态机完善：`await()/restart()/update()` 语义（当前崩溃自愈 + 配置热更新重启已覆盖主路径）
 - [ ] 发布流程（cangjie-publish）：注意宏库带 organization 跨模块消费缺陷——若对外发布宏，评估去 org 或实测中心仓拉取路径
-- [ ] cordis-cj 发版 0.2.0（P8 UDS + P9 语义核心）
+- [ ] cordis-cj 发版 0.2.0（P8 UDS + P9 语义核心 + P10 服务系统）

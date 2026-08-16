@@ -46,10 +46,10 @@
 | 2 | 依赖变更自动通知重载 | `reflect.notify()` → 依赖者 fiber 重载 | ✅ PROVIDER_CHANGED/DEPENDENCY_LOST 通知 | 🔴→✅ 已实现 |
 | 3 | 事件派发模式 | emit / parallel / serial / bail / waterfall | ✅ 全部（含 once/prepend） | 🔴→✅ 已实现 |
 | 4 | 事件 `once` / prepend / global / 过滤 | 完整 | 🟡 once/prepend 已实现；global/过滤未做 | 🟡 |
-| 5 | Service 基类（类即服务） | 134 个服务子类 | key + handler 模式 | 🟡 高频 |
-| 6 | Config schema 校验 | standard-schema + ValidationError（含路径） | config 透传不校验 | 🟡 |
+| 5 | Service 基类（类即服务） | 134 个服务子类 | ✅ Service 基类（provide/register/bind/check） | 🟡→✅ 已实现 |
+| 6 | Config schema 校验 | standard-schema + ValidationError（含路径） | ✅ ConfigSchema（白名单/类型/必填 + 路径化） | 🟡→✅ 已实现 |
 | 7 | Fiber 状态机 | 6 态 + await/restart/update | Starting/Active/Unloading/Failed + 崩溃自愈 | 🟡 |
-| 8 | 配置热更新 | loader `internal/update` + 持久化回写 | reconcile 循环（文件变更重读） | 🟡 |
+| 8 | 配置热更新 | loader `internal/update` + 持久化回写 | ✅ 配置传递 + reconcile 检测 config 变更重启 | 🟡→✅ 已实现 |
 | 9 | 服务隔离 `isolate` | 同名服务多实现按作用域分隔 | 无 | 🟢 |
 | 10 | 服务拦截 `intercept` | 服务级配置合并 | 无 | 🟢 |
 | 11 | `accessor` / `mixin` | ctx 属性动态扩展 | 无 | 🟢 |
@@ -93,11 +93,11 @@
 2. ✅ **事件总线 v2**：`emit`（现有）/ `parallel` / `serial` / `bail` / `waterfall` + `once` + `prepend` + 订阅者返回值（`onVal`）—— 宿主聚合派发，对齐 Cordis DispatchMode
 3. ✅ **依赖变更通知**：服务提供 → `PROVIDER_CHANGED` 唤醒 Pending 依赖者立即重试；服务撤销 → `DEPENDENCY_LOST` 通知依赖者（对齐 Cordis `reflect.notify`）
 
-### 第二阶段：服务系统完善
+### 第二阶段：服务系统完善（✅ 已完成，P10）
 
-4. **Service 类化**：`class DbService extends Service { name="db"; check(){...} }` 抽象（宿主侧提供 base class），替代裸 key+handler 的一部分场景
-5. **Config schema 校验**：插件声明 Config（TOML 字段白名单/类型校验），加载失败给路径化错误
-6. **配置热更新**：reconcile 检测到 entry.config 变更 → 重启该插件（进程隔离下天然安全）
+4. ✅ **Service 类化**：`cordis_plugin/src/service.cj`——`Service` 抽象基类（类即服务）：构造 `super(ctx, name)` 自动 `ctx.provide`；`register(method, handler)` 注册服务方法；`bind()` 构造末尾接入 invoke 分发（仓颉限制：可继承类构造不能捕获 `this`，故用构造后钩子对齐 Cordis `[Service.init]`）；`check()` 可用性谓词可覆写
+5. ✅ **Config schema 校验**：`cordis_core/src/config_schema.cj`——`ConfigFieldSpec`（name/typeName/required）+ `ConfigSchema`（`validate` 宽松 / `validateStrict` 含未知字段检查），类型含 string/bool/int/float/array/object；错误带完整路径（如 `plugins[0].config.port: expected int, got string`）；`PluginHost.registerSchema(pluginId, schema)` + `launchPlugin` 前置校验（失败抛路径化异常）
+6. ✅ **配置热更新 + 配置传递**：`InitializeResult.config` 宿主下发 `entry.config`（DataModel→JsonValue），插件侧 `PluginContext.config`（toDataModel 转回）；reconcile 的 `entryChanged` 检测 config 变更 → 重启插件 → 新配置生效（e2e：offset 10→100，add 结果 15→105）
 
 ### 第三阶段：增强
 

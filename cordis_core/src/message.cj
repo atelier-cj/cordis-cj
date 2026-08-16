@@ -55,20 +55,26 @@ public class InitializeParams <: JsonSerializable & JsonDeserializable<Initializ
 
 /**
  * initialize 响应 result（宿主 → 插件）
+ * @param config 插件私有配置（宿主从 entry.config 下发，JsonValue 透传）
  */
 public class InitializeResult <: JsonSerializable & JsonDeserializable<InitializeResult> {
     public let ok: Bool
     public let providers: HashMap<String, String>   // serviceKey -> 提供者插件 id
+    public let config: ?JsonValue
 
-    public init(ok: Bool, providers: HashMap<String, String>) {
+    public init(ok: Bool, providers: HashMap<String, String>, config!: ?JsonValue = None) {
         this.ok = ok
         this.providers = providers
+        this.config = config
     }
 
     public func toJson(w: JsonWriter): Unit {
         w.startObject()
         w.writeName("ok").writeValue(this.ok)
         w.writeName("providers").writeValue(this.providers)
+        if (let Some(cfg) <- this.config) {
+            w.writeName("config").writeValue(cfg)
+        }
         w.endObject()
     }
 
@@ -76,15 +82,17 @@ public class InitializeResult <: JsonSerializable & JsonDeserializable<Initializ
         r.startObject()
         var ok: ?Bool = None
         var providers: ?HashMap<String, String> = None
+        var config: ?JsonValue = None
         while (r.peek() != EndObject) {
             match (r.readName()) {
                 case "ok" => ok = r.readValue<Bool>()
                 case "providers" => providers = r.readValue<HashMap<String, String>>()
+                case "config" => config = r.readValue<JsonValue>()
                 case _ => r.skip()
             }
         }
         r.endObject()
-        InitializeResult(ok.getOrThrow(), providers.getOrThrow())
+        InitializeResult(ok.getOrThrow(), providers.getOrThrow(), config: config)
     }
 }
 

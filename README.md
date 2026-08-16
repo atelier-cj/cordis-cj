@@ -303,6 +303,20 @@ let cfg = ConfigLoader.load("cordis.toml")                  // 文件
 | `invokeHandler` | `invokeHandler(service: String, method: String, args: Array<JsonValue>): JsonValue` | 分发宿主转发的调用 |
 | `serviceCount` / `effectCount` | `prop ... : Int64` | 诊断用 |
 
+#### `Service`（服务基类，类即服务）
+
+对齐 Cordis `Service`：继承并在构造中 `super(ctx, name)` 自动 `ctx.provide`；`register(method, handler)` 注册服务方法；构造末尾 `bind()` 接入 invoke 分发；`check()` 可用性谓词可覆写。
+
+```cangjie
+public class CalcService <: Service {
+    public init(ctx: PluginContext) {
+        super(ctx, "calc")
+        this.register("add", { args => /* ... */ })
+        this.bind()   // 构造末尾（仓颉可继承类构造不能捕获 this）
+    }
+}
+```
+
 ### 宿主侧（`ystyle::cordis_host`）
 
 #### `PluginManager`（进程管理）
@@ -355,6 +369,10 @@ let cfg = ConfigLoader.load("cordis.toml")                  // 文件
 #### `ConfigLoader`（统一配置加载）
 
 `loadToml<T>(path)` / `parseTomlString<T>(str)` / `parseJsonString<T>(str)`（泛型，`T <: Serializable<T>`）/ `load(path): CordisConfig` / `parseString(str): CordisConfig`。
+
+#### `ConfigSchema`（配置 schema 校验）
+
+`ConfigFieldSpec(name, typeName, required)` + `ConfigSchema(fields)`：`validate(config, path)`（宽松）/ `validateStrict(config, path)`（含未知字段检查）；类型 string/bool/int/float/array/object；错误带完整路径（如 `plugins[0].config.port: expected int, got string`）。宿主侧 `PluginHost.registerSchema(pluginId, schema)` 后 `launchPlugin` 前置校验，失败抛路径化异常。
 
 #### `InstanceStatus`
 

@@ -321,6 +321,133 @@ class EndToEndTest {
         host.removePlugin("inject-demo")
     }
 
+    private static func buildToml(offset: Int64): String {
+        "interval = 5\n" +
+            "ping_interval = 30\n" +
+            "\n" +
+            "[[plugins]]\n" +
+            "id = \"hot-plugin\"\n" +
+            "source = \"${pluginBinary()}\"\n" +
+            "provide = [\"echo\", \"add\"]\n" +
+            "\n" +
+            "[plugins.config]\n" +
+            "offset = ${offset}\n"
+    }
+
+    @TestCase
+    func testConfigHotReload(): Unit {
+        // 配置热更新（docs/cordis-comparison.md §4）：
+        // 改 TOML 的 plugins.config → reconcile → entryChanged 检测到 config 变更
+        // → removePlugin + 重启 → 新配置生效（add 服务带新 offset）
+        let configPath = "./.e2e_hot_reload.toml"
+        // 写初始配置（offset=10）
+        let file = File(configPath, OpenMode.Write)
+        file.write(buildToml(10).toArray())
+        file.flush()
+
+        // 收集插件日志（验证配置下发：ready 日志带 offset）
+        let logs = ArrayList<String>()
+        let logLock = Mutex()
+        let host = PluginHost(PluginManager(), { _, line =>
+            synchronized(logLock) {
+                logs.add(line)
+            }
+        })
+        host.reconcile(configPath)
+
+        // 1. 等待插件 Active + 服务注册 + 配置日志
+        var ready = false
+        for (i in 0..200) {
+            if (host.state.hasService("add")) {
+                ready = true
+                break
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(ready)
+
+        // 1.5 确认插件收到配置（ready 日志含 offset=10）
+        var offsetSeen = false
+        for (i in 0..100) {
+            synchronized(logLock) {
+                for (line in logs) {
+                    if (line.contains("offset=10")) {
+                        offsetSeen = true
+                        break
+                    }
+                }
+            }
+            if (offsetSeen) {
+                break
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(offsetSeen)
+
+        // 2. invoke add(2,3) → 5 + offset(10) = 15
+        let inst = host.state.getInstance("hot-plugin")
+        match (inst) {
+            case Some(instance) =>
+                let r1 = instance.client.call<JsonValue, JsonValue>("invoke",
+                    params: Some(JsonValue.fromObject(InvokeParams("add", "add",
+                        [JsonValue.Number(2.0), JsonValue.Number(3.0)]))))
+                match (r1) {
+                    case Ok(v) =>
+                        match (v) {
+                            case JsonValue.Number(n) => @Expect(n, 15.0)
+                            case _ => @Fail("expected 15 with offset 10")
+                        }
+                    case Err(e) => @Fail("invoke failed: ${e}")
+                }
+            case None => @Fail("instance not found")
+        }
+
+        // 3. 修改配置（offset=100）→ 触发调谐 → 插件重启 + 新配置生效
+        let file2 = File(configPath, OpenMode.Write)
+        file2.write(buildToml(100).toArray())
+        file2.flush()
+        host.reconcile(configPath)
+
+        // 4. 等待新实例（重启后）Active
+        var restarted = false
+        var newInstance: ?PluginInstance = None
+        for (i in 0..200) {
+            let inst2 = host.state.getInstance("hot-plugin")
+            match (inst2) {
+                case Some(i2) =>
+                    if (i2.status == InstanceStatus.Active) {
+                        restarted = true
+                        newInstance = Some(i2)
+                        break
+                    }
+                case None => ()
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(restarted)
+
+        // 5. 新配置生效：add(2,3) → 5 + 100 = 105
+        match (newInstance) {
+            case Some(instance) =>
+                let r2 = instance.client.call<JsonValue, JsonValue>("invoke",
+                    params: Some(JsonValue.fromObject(InvokeParams("add", "add",
+                        [JsonValue.Number(2.0), JsonValue.Number(3.0)]))))
+                match (r2) {
+                    case Ok(v) =>
+                        match (v) {
+                            case JsonValue.Number(n) => @Expect(n, 105.0)
+                            case _ => @Fail("expected 105 with offset 100")
+                        }
+                    case Err(e) => @Fail("invoke after reload failed: ${e}")
+                }
+            case None => @Fail("no instance after reload")
+        }
+
+        // 清理
+        host.removePlugin("hot-plugin")
+        remove(Path(configPath))
+    }
+
     @TestCase
     func testMacroPluginLifecycle(): Unit {
         // 宏插件（@Plugin + @Provide 生成）端到端：握手/服务注册/invoke
