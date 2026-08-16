@@ -26,6 +26,8 @@ public class PluginHost {
     private var undoCounter: Int64 = 0
     private var emitCounter: Int64 = 0
     private let lock: Mutex = Mutex()
+    // Config schema 注册表：pluginId -> ConfigSchema（docs/cordis-comparison.md §4）
+    private let schemas: HashMap<String, ConfigSchema> = HashMap<String, ConfigSchema>()
 
     public init(manager: PluginManager, logger: (String, String) -> Unit) {
         this.manager = manager
@@ -38,10 +40,45 @@ public class PluginHost {
     }
 
     /**
+     * 注册插件配置 schema（宿主应用侧声明）
+     * @param pluginId 插件 id
+     * @param schema 配置字段规格
+     */
+    public func registerSchema(pluginId: String, schema: ConfigSchema): Unit {
+        synchronized(this.lock) {
+            this.schemas[pluginId] = schema
+        }
+    }
+
+    /**
+     * 校验插件配置（Config schema）
+     * @return None 通过；Some(错误) 含完整路径（如 "plugins[0].config.port: ..."）
+     */
+    public func validateConfig(entry: PluginEntry, path: String): ?String {
+        let schema: ?ConfigSchema = synchronized(this.lock) {
+            if (this.schemas.contains(entry.id)) {
+                this.schemas[entry.id]
+            } else {
+                None
+            }
+        }
+        match (schema) {
+            case Some(s) => s.validateStrict(entry.config, path)
+            case None => None
+        }
+    }
+
+    /**
      * 拉起插件并注册宿主侧 RPC 处理器
      * @return 新实例（Starting 状态）
+     * @throws Exception 配置 schema 校验失败时（含路径化错误）
      */
     public func launchPlugin(entry: PluginEntry): PluginInstance {
+        // Config schema 校验（失败抛异常，reconcile 捕获记录日志）
+        match (this.validateConfig(entry, "plugins[${entry.id}].config")) {
+            case Some(err) => throw Exception("config validation failed: ${err}")
+            case None => ()
+        }
         let instance = this.manager.launch(entry)
         this.registerHostHandlers(instance)
         this.state.addInstance(instance)
@@ -72,7 +109,10 @@ public class PluginHost {
                                 instance.status = InstanceStatus.Active
                             }
                             let providers = this.snapshotProviders(params.inject)
-                            Some(JsonValue.fromObject(InitializeResult(true, providers)))
+                            // 下发插件私有配置（entry.config DataModel → JsonValue）
+                            let cfg = JsonValue.fromDataModel(instance.entry.config)
+                            Some(JsonValue.fromObject(InitializeResult(true, providers,
+                                config: Some(cfg))))
                         } else {
                             // 依赖未满足：保持 Pending 等待重试（插件侧会周期重发 initialize）
                             synchronized(this.lock) {

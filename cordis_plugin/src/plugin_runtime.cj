@@ -4,6 +4,7 @@ import ystyle::cordis_core.*
 import ystyle::jsonrpc.*
 import ystyle::jsonrpc_unix.UnixClientTransport
 import jsonvalue.*
+import stdx.serialization.serialization.*
 import stdx.encoding.json.stream.{JsonSerializable, JsonDeserializable}
 import std.collection.{HashMap, map, collectArray}
 import std.sync.{Mutex, Condition}
@@ -205,6 +206,16 @@ public class PluginContext {
     }
 
     /**
+     * 插件私有配置（宿主从 entry.config 下发，握手时获得）
+     * 类型为 DataModel（stdx.serialization 中间表示），可 match 各子类型读取
+     */
+    public prop config: DataModel {
+        get() {
+            this.runtime.pluginConfig
+        }
+    }
+
+    /**
      * 创建服务代理（@Inject 宏产物）
      *
      * @param serviceKey 目标服务 Key
@@ -242,6 +253,8 @@ public class PluginRuntime {
     private var dependencyChanged: Bool = false
     // 最近一次收到的依赖通知（供插件业务感知，docs/cordis-comparison.md §4）
     private var lastNotify: ?NotifyParams = None
+    // 插件私有配置（宿主 initialize 响应下发，docs/cordis-comparison.md §4 配置传递）
+    internal var pluginConfig: DataModel = DataModelNull()
 
     /**
      * 以插件自身 stdio 为传输层启动（插件 main 的标准入口）
@@ -340,6 +353,12 @@ public class PluginRuntime {
                 case Ok(r) =>
                     if (r.ok) {
                         handshakeOk = true
+                        // 保存宿主下发的插件私有配置（JsonValue → DataModel）
+                        match (r.config) {
+                            case Some(cfg) =>
+                                this.pluginConfig = cfg.toDataModel()
+                            case None => ()
+                        }
                     }
                     // ok=false：依赖未满足，进入等待重试
                 case Err(e) =>

@@ -4,6 +4,7 @@ import ystyle::cordis_core.*
 import ystyle::cordis_plugin.*
 import ystyle::jsonrpc.*
 import jsonvalue.*
+import stdx.serialization.serialization.*
 import std.collection.{HashMap, ArrayList}
 import std.io.ByteBuffer
 import std.sync.{Mutex, Condition}
@@ -249,6 +250,66 @@ class PluginRuntimeTest {
         @Expect(ok)
 
         host.client.close()
+        pluginT.close()
+    }
+
+    @TestCase
+    func testConfigPassedToPlugin(): Unit {
+        // 配置传递（docs/cordis-comparison.md §4）：宿主 initialize 响应下发
+        // entry.config → 插件 ctx.config 读取
+        let (host, pluginT) = MemoryDuplexTransport.pair()
+        let client = JsonRpcClient(host, framing: NewlineFraming())
+        let fhost = FakeHost(client)
+        // 宿主 initialize：返回 ok + config（模拟 PluginEntry.config）
+        client.registerRequestHandler(Methods.INITIALIZE, { req =>
+            let providers = HashMap<String, String>()
+            let dm = DataModelStruct()
+                .add(field<String>("host", "127.0.0.1"))
+                .add(field<Int64>("port", 5432))
+            let cfg = JsonValue.fromDataModel(dm)
+            Some(JsonValue.fromObject(InitializeResult(true, providers, config: Some(cfg))))
+        })
+        client.registerRequestHandler(Methods.PROVIDE, { req =>
+            Some(JsonValue.fromObject(ProvideResult("undo-1")))
+        })
+        client.start()
+
+        // 插件 handler 读取 config 并记录
+        spawn {
+            PluginRuntime.run(pluginT, "cfg-plugin", [], [], { ctx =>
+                match (ctx.config) {
+                    case s: DataModelStruct =>
+                        match (s.get("host")) {
+                            case h: DataModelString =>
+                                synchronized(fhost.lock) {
+                                    fhost.logs.add("host:${h.getValue()}")
+                                    fhost.cond.notifyAll()
+                                }
+                            case _ => ()
+                        }
+                        match (s.get("port")) {
+                            case p: DataModelFloat =>
+                                synchronized(fhost.lock) {
+                                    fhost.logs.add("port:${Int64(p.getValue())}")
+                                    fhost.cond.notifyAll()
+                                }
+                            case _ => ()
+                        }
+                    case _ =>
+                        synchronized(fhost.lock) {
+                            fhost.logs.add("config:empty")
+                            fhost.cond.notifyAll()
+                        }
+                }
+                fhost.markHandlerRan()
+            })
+        }
+        let ok = fhost.waitFor({ => fhost.logs.size >= 2 })
+        @Expect(ok)
+        @Expect(fhost.logs.contains("host:127.0.0.1"))
+        @Expect(fhost.logs.contains("port:5432"))
+
+        client.close()
         pluginT.close()
     }
 
