@@ -349,4 +349,66 @@ class EndToEndTest {
         @Expect(host.eventRegistry.subscriberCount("stats/report"), 0)
         host.removePlugin("event-emit")
     }
+
+    @TestCase
+    func testInjectMacroEndToEnd(): Unit {
+        // @Inject 宏端到端：真实宿主 + 双插件进程
+        // 提供者（e2e 插件提供 add）先启动并注册服务；
+        // 消费者（inject_demo 用 @Inject["add"] 注入）后启动，
+        // 经宿主 invoke 转发调用 add 服务（5+6=11）
+        let providerBinary = "./target/release/bin/ystyle::cordis_plugin.examples.e2e"
+        let consumerBinary = "./target/release/bin/ystyle::cordis_plugin.examples.inject_demo"
+        @Expect(exists(Path(providerBinary)))
+        @Expect(exists(Path(consumerBinary)))
+
+        let host = PluginHost(PluginManager())
+
+        // 1. 先启动提供者（e2e 插件提供 echo/add）
+        let providerEntry = PluginEntry("e2e-provider", providerBinary,
+            provide: ArrayList<String>.of(["echo", "add"]))
+        host.launchPlugin(providerEntry)
+        // 等待 add 服务注册
+        var providerReady = false
+        for (i in 0..100) {
+            if (host.state.hasService("add")) {
+                providerReady = true
+                break
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(providerReady)
+
+        // 2. 启动消费者（inject_demo，@Inject["add"]）
+        let consumerEntry = PluginEntry("inject-demo", consumerBinary,
+            inject: ArrayList<String>.of(["add"]),
+            provide: ArrayList<String>.of(["calc"]))
+        let consumer = host.launchPlugin(consumerEntry)
+
+        // 3. 等消费者 Active（initialize 依赖检查：add 已就绪）
+        var active = false
+        for (i in 0..100) {
+            if (consumer.status == InstanceStatus.Active) {
+                active = true
+                break
+            }
+            sleep(50 * Duration.millisecond)
+        }
+        @Expect(active)
+
+        // 4. 宿主 invoke 消费者的 calc 服务 → 消费者内部经代理调用 add(5,6) → 返回 11
+        let result = consumer.client.call<JsonValue, JsonValue>("invoke",
+            params: Some(JsonValue.fromObject(InvokeParams("calc", "calc", []))))
+        match (result) {
+            case Ok(v) =>
+                match (v) {
+                    case JsonValue.Number(n) => @Expect(n, 11.0)   // 5 + 6
+                    case _ => @Fail("expected number result")
+                }
+            case Err(e) => @Fail("inject invoke failed: ${e}")
+        }
+
+        // 5. 清理
+        host.removePlugin("inject-demo")
+        host.removePlugin("e2e-provider")
+    }
 }

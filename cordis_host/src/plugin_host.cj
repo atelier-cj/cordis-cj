@@ -134,6 +134,43 @@ public class PluginHost {
             }
         })
 
+        // 插件 → 宿主：invoke 服务调用转发（@Inject 代理链路）
+        // 消费者发 invoke → 查 serviceIndex 找提供者 → 用提供者连接转发 → 返回结果
+        client.registerRequestHandler(Methods.INVOKE, { req =>
+            match (req.params) {
+                case Some(p) =>
+                    try {
+                        let params = JsonValue.toObject<InvokeParams>(p)
+                        match (this.state.serviceIndex.get(params.service)) {
+                            case Some(providerId) =>
+                                match (this.state.getInstance(providerId)) {
+                                    case Some(provider) =>
+                                        let result = provider.client.call<JsonValue, JsonValue>(
+                                            Methods.INVOKE,
+                                            params: Some(JsonValue.fromObject(params)),
+                                            timeout: 30 * Duration.second)
+                                        match (result) {
+                                            case Ok(v) => Some(v)
+                                            case Err(e) =>
+                                                this.logger(providerId, "invoke forward error: ${e}")
+                                                None
+                                        }
+                                    case None =>
+                                        this.logger(providerId, "invoke forward: provider '${providerId}' not found")
+                                        None
+                                }
+                            case None =>
+                                this.logger(providerId, "invoke forward: service '${params.service}' not available")
+                                None
+                        }
+                    } catch (e: Exception) {
+                        this.logger(providerId, "invoke parse error: ${e.message}")
+                        None
+                    }
+                case None => None
+            }
+        })
+
         // 事件总线：插件 → 宿主 订阅 / 退订（docs/design-events.md §5.3）
         client.registerRequestHandler(Methods.EVENTS_SUBSCRIBE, { req =>
             match (req.params) {

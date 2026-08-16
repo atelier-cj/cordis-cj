@@ -31,6 +31,10 @@
   output-type = "executable"
   compile-option = "--static"
 
+[package.package-configuration."ystyle::cordis_plugin.examples.inject_demo"]
+  output-type = "executable"
+  compile-option = "--static"
+
 [dependencies]
   "ystyle::cordis_core" = "0.1.0"
   "ystyle::jsonrpc" = { path = "../../json-rpc/jsonrpc" }
