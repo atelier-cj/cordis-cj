@@ -8,6 +8,7 @@ import stdx.serialization.serialization.*
 import stdx.encoding.json.stream.{JsonSerializable, JsonDeserializable}
 import std.collection.{HashMap, ArrayList, map, collectArray}
 import std.sync.{Mutex, Condition}
+import std.env.getCommandLine
 
 /**
  * 插件运行时上下文：暴露给插件业务逻辑的 API（docs/design-impl.md §6）
@@ -415,10 +416,20 @@ public class PluginRuntime {
      */
     public static func run(pluginId: String, inject: Array<String>, provide: Array<String>,
                            handler: (PluginContext) -> Unit): Unit {
-        let transport = LineStdioTransport()
-        let server = JsonRpcServer(transport, framing: NewlineFraming())
-        let runtime = PluginRuntime(server, pluginId)
-        runtime.start(inject, provide, handler)
+        // 自动检测传输模式：宿主以 uds 模式拉起时会传 --uds <path> 命令行参数
+        // （std.env.getCommandLine() 获取进程命令行，无需用户从 main 手动传参）
+        match (PluginRuntime.autoUdsPath()) {
+            case Some(path) =>
+                let transport = UnixClientTransport(path)
+                let server = JsonRpcServer(transport, framing: ContentLengthFraming())
+                let runtime = PluginRuntime(server, pluginId)
+                runtime.start(inject, provide, handler)
+            case None =>
+                let transport = LineStdioTransport()
+                let server = JsonRpcServer(transport, framing: NewlineFraming())
+                let runtime = PluginRuntime(server, pluginId)
+                runtime.start(inject, provide, handler)
+        }
     }
 
     /**
@@ -465,6 +476,24 @@ public class PluginRuntime {
             i++
         }
         None
+    }
+
+    /**
+     * 从进程命令行自动解析 UDS 地址（std.env.getCommandLine()）
+     *
+     * 插件 main 无需接收/透传命令行参数：run() 内部自动检测
+     * 宿主传的 --uds <path>（uds 模式）并切换传输层。
+     *
+     * @return Some(path) 找到 --uds 参数；None 未指定（stdio 模式）
+     */
+    public static func autoUdsPath(): ?String {
+        try {
+            let args = getCommandLine()
+            PluginRuntime.parseUdsArg(args)
+        } catch (e: Exception) {
+            // 无法获取命令行（平台不支持等）→ 退化为 stdio 模式
+            None
+        }
     }
 
     private init(server: JsonRpcServer, pluginId: String) {

@@ -19,7 +19,7 @@ import stdx.serialization.serialization.*
  * offset = 100   # add 结果加偏移（配置热更新验证用）
  * ```
  */
-main(args: Array<String>): Int64 {
+main(): Int64 {
     let handler = { ctx: PluginContext =>
         // 读取插件私有配置（宿主 initialize 响应下发），解析为不可变值供 lambda 捕获
         let offset = match (ctx.config) {
@@ -48,11 +48,8 @@ main(args: Array<String>): Int64 {
         ctx.log("info", "e2e plugin ready (offset=${offset})")
     }
 
-    match (PluginRuntime.parseUdsArg(args)) {
-        case Some(path) =>
-            PluginRuntime.runUds(path, "e2e-plugin", [], ["echo", "add"], handler)
-        case None =>
-            PluginRuntime.run("e2e-plugin", [], ["echo", "add"], handler)
-    }
+    // run 自动检测传输模式：宿主 uds 模式传 --uds <path>（getCommandLine 获取），
+    // 否则 stdio——插件 main 无需感知
+    PluginRuntime.run("e2e-plugin", [], ["echo", "add"], handler)
     return 0
 }
