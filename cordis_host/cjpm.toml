@@ -17,8 +17,8 @@
 
 [dependencies]
   "ystyle::cordis_core" = "0.1.0"
-  "ystyle::jsonrpc" = { path = "../../json-rpc/jsonrpc" }
-  "ystyle::jsonrpc_unix" = { path = "../../json-rpc/jsonrpc_unix" }
+  "ystyle::jsonrpc" = "0.7.0"
+  "ystyle::jsonrpc_unix" = "0.7.0"
   "jsonvalue" = "1.1.0"
 
 [target.x86_64-unknown-linux-gnu.bin-dependencies]
