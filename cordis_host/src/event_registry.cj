@@ -29,6 +29,25 @@ public class Subscription {
 }
 
 /**
+ * 宿主本地事件订阅记录（进程内回调，docs/design-events.md §5.4）
+ *
+ * 与 Subscription 的区别：不经过插件连接，listener 在宿主进程内
+ * 直接回调。用于宿主自身观察插件事件（如 harness 事件桥把
+ * agent 事件转发给 UI），无需为宿主伪造 PluginInstance。
+ */
+public class LocalSubscription {
+    public let id: String
+    public let event: String
+    public let listener: (Array<JsonValue>) -> Unit
+
+    public init(id: String, event: String, listener: (Array<JsonValue>) -> Unit) {
+        this.id = id
+        this.event = event
+        this.listener = listener
+    }
+}
+
+/**
  * waterfall 进行中的链状态（docs/design-events.md §7 洋葱 next）
  *
  * 一次 waterfall 派发注册一条链：订阅者快照 + 推进索引 + 传入参数。
@@ -84,6 +103,8 @@ public class EventRegistry {
     private let subscribers: HashMap<String, ArrayList<Subscription>> = HashMap<String, ArrayList<Subscription>>()
     // subscriptionId -> Subscription（退订用）
     private let byId: HashMap<String, Subscription> = HashMap<String, Subscription>()
+    // 宿主本地订阅：事件名 -> 本地监听器列表（进程内回调，不经过插件连接）
+    private let localSubscribers: HashMap<String, ArrayList<LocalSubscription>> = HashMap<String, ArrayList<LocalSubscription>>()
     // waterfall 进行中的链：emitId -> 链上下文（docs/design-events.md §7 洋葱 next）
     private let chains: HashMap<String, WaterfallChain> = HashMap<String, WaterfallChain>()
     private let lock: Mutex = Mutex()
@@ -199,6 +220,68 @@ public class EventRegistry {
     }
 
     /**
+     * 宿主本地订阅事件（进程内回调，不经过插件连接）
+     *
+     * 用于宿主自身观察插件事件（如 harness 事件桥把 agent 事件
+     * 转发给 UI）。只接收 emit 模式（fire-and-forget）派发的事件；
+     * serial/bail/waterfall 模式仍只派发给插件订阅者。
+     *
+     * @param event 事件名
+     * @param listener 本地回调（宿主进程内直接调用，异常被吞掉不影响派发）
+     * @return 订阅 id（unsubscribeLocal 用）
+     */
+    public func subscribeLocal(event: String, listener: (Array<JsonValue>) -> Unit): String {
+        let id = this.allocateId()
+        let sub = LocalSubscription(id, event, listener)
+        synchronized(this.lock) {
+            if (!this.localSubscribers.contains(event)) {
+                this.localSubscribers[event] = ArrayList<LocalSubscription>()
+            }
+            this.localSubscribers[event].add(sub)
+        }
+        id
+    }
+
+    /**
+     * 取消宿主本地订阅
+     * @return 是否找到并取消了该订阅
+     */
+    public func unsubscribeLocal(subscriptionId: String): Bool {
+        synchronized(this.lock) {
+            for ((event, list) in this.localSubscribers) {
+                var idx: Int64 = -1
+                for (i in 0..list.size) {
+                    if (list[i].id == subscriptionId) {
+                        idx = i
+                        break
+                    }
+                }
+                if (idx >= 0) {
+                    list.remove(at: idx)
+                    if (list.size == 0) {
+                        this.localSubscribers.remove(event)
+                    }
+                    return true
+                }
+            }
+            false
+        }
+    }
+
+    /**
+     * 宿主本地订阅者数量（测试/诊断用）
+     */
+    public func localSubscriberCount(event: String): Int64 {
+        synchronized(this.lock) {
+            if (this.localSubscribers.contains(event)) {
+                this.localSubscribers[event].size
+            } else {
+                0
+            }
+        }
+    }
+
+    /**
      * 按派发模式向事件的所有订阅者派发
      *
      * 模式语义（docs/design-events.md §7）：
@@ -259,6 +342,32 @@ public class EventRegistry {
             let result = this.callSubscriber(sub, args, event, emitId, EventMode.EMIT)
             if (result.isSome()) {
                 delivered++
+            }
+        }
+        // 宿主本地订阅（进程内回调，不经过插件连接）
+        this.dispatchLocal(event, args)
+        delivered
+    }
+
+    /**
+     * 向宿主本地订阅者派发（fire-and-forget，异常吞掉不影响派发）
+     * @return 成功回调的本地订阅者数量
+     */
+    private func dispatchLocal(event: String, args: Array<JsonValue>): Int64 {
+        let list: ArrayList<LocalSubscription> = synchronized(this.lock) {
+            if (this.localSubscribers.contains(event)) {
+                ArrayList<LocalSubscription>(this.localSubscribers[event])
+            } else {
+                ArrayList<LocalSubscription>()
+            }
+        }
+        var delivered: Int64 = 0
+        for (sub in list) {
+            try {
+                sub.listener(args)
+                delivered++
+            } catch (_) {
+                // 本地回调异常不中断派发
             }
         }
         delivered

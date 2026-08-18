@@ -1,5 +1,9 @@
 version = 0
 
 [requires]
-  jsonvalue = {version = "1.1.0"}
+  gjson = {version = "1.2.1"}
   tomlcj = {version = "1.0.0"}
+  "ystyle::jsonrpc_unix" = {version = "0.7.0"}
+  "ystyle::jsonrpc_stdio" = {version = "0.7.0"}
+  jsonvalue = {version = "1.1.0"}
+  "ystyle::jsonrpc" = {version = "0.7.0"}
