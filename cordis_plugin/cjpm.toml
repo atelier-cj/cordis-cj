@@ -36,7 +36,7 @@
   compile-option = "--static"
 
 [dependencies]
-  "ystyle::cordis_core" = "0.1.0"
+  "ystyle::cordis_core" = { path = "../cordis_core" }
   "ystyle::jsonrpc" = "0.7.0"
   "ystyle::jsonrpc_stdio" = "0.7.0"
   "ystyle::jsonrpc_unix" = "0.7.0"

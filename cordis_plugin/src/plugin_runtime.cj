@@ -729,9 +729,10 @@ public class PluginRuntime {
                             let result = this.registry.invokeHandler(params.service, params.method, params.args)
                             complete(result)
                         } catch (e: Exception) {
-                            complete(JsonValue.Null)
+                            // 异常信息透传（调试/协议错误可见）；协议化错误在后续版本完善
+                            complete(JsonValue.String("INVOKE-ERROR: ${e.message}"))
                         }
-                    case None => complete(JsonValue.Null)
+                    case None => complete(JsonValue.String("INVOKE-ERROR: missing params"))
                 }
             }
         })
