@@ -17,7 +17,8 @@
 
 - 只发布**库包**：`cordis_core`（核心）→ `cordis_host`（宿主侧）→ `cordis_plugin`（插件侧），按依赖顺序发版
 - **测试包与示例包不需要发布到中心仓**：`cordis_tests`（测试）、`cordis_examples`（示例）仅用于本地构建与集成验证（`cjpm test`），不进发版清单、不做 bundle/publish
-- 发版顺序：`cordis_core` 先发（含 registry 索引同步），`cordis_host`/`cordis_plugin` 依赖它随后发；workspace 内验证用 path 依赖，发布前切回 registry 版本号
+- 发版顺序：`cordis_core` 先发（含 registry 索引同步），`cordis_host`/`cordis_plugin` 依赖它随后发
+- workspace 成员间依赖**直接写版本号**（如 `"ystyle::cordis_core" = "0.1.0"`），未发布也能在 workspace 内解析到本地成员，无需 path 依赖，也无需发版前转换
 
 ## 项目结构
 
