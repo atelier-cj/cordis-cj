@@ -227,7 +227,7 @@ public class EventRegistry {
      * serial/bail/waterfall 模式仍只派发给插件订阅者。
      *
      * @param event 事件名
-     * @param listener 本地回调（宿主进程内直接调用，异常被吞掉不影响派发）
+     * @param listener 本地回调（宿主进程内直接调用，异常记录到 stderr 且不影响派发）
      * @return 订阅 id（unsubscribeLocal 用）
      */
     public func subscribeLocal(event: String, listener: (Array<JsonValue>) -> Unit): String {
@@ -350,7 +350,7 @@ public class EventRegistry {
     }
 
     /**
-     * 向宿主本地订阅者派发（fire-and-forget，异常吞掉不影响派发）
+     * 向宿主本地订阅者派发（fire-and-forget：回调异常记录到 stderr，不影响其余订阅者）
      * @return 成功回调的本地订阅者数量
      */
     private func dispatchLocal(event: String, args: Array<JsonValue>): Int64 {
@@ -366,8 +366,10 @@ public class EventRegistry {
             try {
                 sub.listener(args)
                 delivered++
-            } catch (_) {
-                // 本地回调异常不中断派发
+            } catch (e: Exception) {
+                // 本地回调异常不中断派发，但必须可见：否则宿主内的监听方（如 UI 事件桥）
+                // 静默失联——事件照发、回调照挂，却查不到任何原因
+                eprintln("[cordis-host] event_registry: local listener for '${event}' failed: " + e.toString())
             }
         }
         delivered
@@ -500,11 +502,15 @@ public class EventRegistry {
                     this.consumeOnce(sub)
                     Some(v)
                 case Err(e) =>
-                    // 派发失败（订阅者超时/崩溃）→ 跳过并自动清理
+                    // 派发失败（订阅者超时/崩溃）→ 跳过并自动清理；
+                    // 失败原因必须可见，否则只看到「少投递了一个订阅者」而不知为何
+                    eprintln("[cordis-host] event_registry: dispatch to '${sub.pluginId}' failed (event='${event}'): ${e}")
                     this.unsubscribe(sub.id)
                     None
             }
         } catch (e: Exception) {
+            // 派发途中异常（构造参数/传输层）→ 同样清理订阅并留痕
+            eprintln("[cordis-host] event_registry: dispatch to '${sub.pluginId}' error (event='${event}'): " + e.toString())
             this.unsubscribe(sub.id)
             None
         }

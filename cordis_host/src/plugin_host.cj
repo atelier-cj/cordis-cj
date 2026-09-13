@@ -289,6 +289,9 @@ public class PluginHost {
                         let removed = this.eventRegistry.unsubscribe(params.subscriptionId)
                         Some(JsonValue.Boolean(removed))
                     } catch (e: Exception) {
+                        // 退订解析/执行异常：插件只拿到 false（与「订阅不存在」无法区分），
+                        // 交给日志通道才可诊断（同 subscribe/emit 等 handler 的写法）
+                        this.logger(providerId, "unsubscribe error: ${e.message}")
                         Some(JsonValue.Boolean(false))
                     }
                 case None => Some(JsonValue.Boolean(false))
