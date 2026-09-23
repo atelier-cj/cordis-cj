@@ -9,6 +9,7 @@
 - **声明式配置**：TOML/JSON 定义期望状态，调和器自动 diff 并执行 Add/Remove/Update
 - **服务注入/提供**：插件声明 `inject`/`provide`，宿主按依赖拓扑启动，崩溃自动重启
 - **零样板插件开发**：`@Plugin[]` / `@Provide["key"]` / `@Inject["key"]` 宏自动生成 main、握手与路由注册
+- **脚本插件**：插件可以是 xisp（Lisp）脚本 —— `cordis_xisp` 运行时把 ctx 能力注入脚本环境（`cordis::*`），无需编译
 - **事件总线**：`ctx.on` / `ctx.emit` 解耦插件间通信，宿主扇出路由
 - **类型安全**：`invoke<T, R>` / `registerHandler<T, R>` 泛型 API 自动序列化/反序列化
 
@@ -45,6 +46,7 @@
 | `cordis_core` | `ystyle::cordis_core` | 协议消息类（JsonSerializable）、统一 TOML/JSON 配置加载 |
 | `cordis_host` | `ystyle::cordis_host` | 进程管理（PipeTransport/UnixServerTransport/PluginManager）、调和器（PluginHost/Reconciler） |
 | `cordis_plugin` | `ystyle::cordis_plugin` | 插件 SDK（PluginRuntime/ServiceRegistry）、宏（`ystyle::cordis_plugin.macros`） |
+| `cordis_xisp` | `ystyle::cordis_xisp` | xisp 脚本插件运行时：`cordis::*` Lisp 绑定 + 可执行入口（[说明](cordis_xisp/README.md)） |
 
 ## 快速开始
 
@@ -457,6 +459,45 @@ ctx.on<GreetPayload>("greet", { payload =>
 
 > 宏包与调用方需**同模块**；跨模块消费带 organization 的宏库有 cjpm 缺陷（见 [docs/macro-org-dependency-issue.md](docs/macro-org-dependency-issue.md)），外部插件建议用显式 API 写法。
 
+## xisp 脚本插件
+
+插件也可以是一个 **xisp（Lisp）脚本**：`cordis_xisp` 提供通用运行时，复用同一套
+cordis 协议，把 `PluginContext` 的能力以 `cordis::*` 绑定注入脚本环境。脚本顶层
+求值即插件初始化，之后由宿主事件驱动。
+
+```toml
+# cordis.toml
+[[plugins]]
+id = "lisp-echo"
+source = "./target/release/bin/ystyle::cordis_xisp.cli"
+args = ["--script", "./cordis_xisp/examples/echo.lisp"]
+provide = ["echo", "add", "whoami"]
+enabled = true
+```
+
+```lisp
+;; echo.lisp
+(cordis::register-handler "echo" (lambda (method args)
+  (if (> (length args) 0) (car args) nil)))
+
+(cordis::register-handler "add" (lambda (method args)
+  (+ (car args) (car (cdr args)))))
+
+(cordis::on "hello" (lambda (args)
+  (cordis::log "info" (string-append "hello event: " (car args)))))
+```
+
+- 脚本 API：`register-handler` / `invoke` / `provide` / `on` / `once` / `emit` /
+  `serial` / `bail` / `waterfall` / `log` / `effect` / `config` / 定时器族；
+- **id / provide / inject 由宿主按 `entry` 以环境变量下发**，cordis.toml 是唯一
+  来源，脚本不重复声明；
+- 脚本环境只有纯函数（无文件/进程/模块/`eval`），OS 级隔离由进程隔离提供；
+- 脚本回调串行化执行；同步请求（`invoke` 等）等待宿主响应前释放脚本锁，
+  因此脚本内嵌套调用自己插件的服务不会死锁。
+
+详见 [`cordis_xisp/README.md`](cordis_xisp/README.md)（使用文档）与
+[docs/design-xisp-plugin.md](docs/design-xisp-plugin.md)（设计决策与取舍）。
+
 ## 测试
 
 ```shell
@@ -464,12 +505,13 @@ eval "$(cjvs env zsh)" && eval "$(cjvs stdx-env zsh)"
 cjpm test -j 16 --no-progress
 ```
 
-72 个用例，覆盖：协议序列化往返、配置解析（含 UDS 服务参数）、管道传输（真实子进程）、UDS 传输回环、进程管理、插件运行时（内存双端对接）、端到端（stdio + UDS 双模式真实宿主 ↔ 真实插件进程：握手/服务注册/invoke/热卸载/崩溃自愈）、宏插件生命周期、独立模块外部插件生命周期、泛型 invoke/registerHandler 全链路、事件总线。
+142 个用例，覆盖：协议序列化往返、配置解析（含 UDS 服务参数）、管道传输（真实子进程）、UDS 传输回环、进程管理、插件运行时（内存双端对接）、端到端（stdio + UDS 双模式真实宿主 ↔ 真实插件进程：握手/服务注册/invoke/热卸载/崩溃自愈）、宏插件生命周期、独立模块外部插件生命周期、泛型 invoke/registerHandler 全链路、事件总线、xisp 脚本插件（JsonValue↔LispValue 转换、内存双端回调与定时器、真实进程 invoke/事件路由/嵌套 invoke 无死锁）。
 
 ## 文档
 
 - [设计文档（v1.0 草案）](docs/design.md)
 - [实现级设计文档（v2.0，真实 API）](docs/design-impl.md)
+- [xisp 脚本插件设计](docs/design-xisp-plugin.md)
 - [进度跟踪与踩坑记录](docs/progress-tracking.md)
 - [cjpm 宏包 organization 缺陷排查](docs/macro-org-dependency-issue.md)
 

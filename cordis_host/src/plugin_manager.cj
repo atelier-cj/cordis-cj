@@ -7,7 +7,7 @@ import std.process.{launch, SubProcess, ProcessRedirect}
 import std.io.StringReader
 import std.sync.Mutex
 import std.fs.{removeIfExists, Path}
-import std.collection.ArrayList
+import std.collection.{ArrayList, HashMap}
 
 /**
  * 插件进程管理器（docs/design-impl.md §3.3、§3.4）
@@ -130,8 +130,25 @@ public class PluginManager {
 
     // ── stdio 模式（默认）──────────────────────────────────────────────
 
+    /**
+     * 构造插件进程的元数据环境变量。
+     *
+     * 插件进程需要知道自己的 id 与 inject/provide 清单：initialize 请求要带
+     * inject/provide，宿主侧 awaitActive 按 entry.provide 等待服务注册。
+     * 由宿主按 entry 下发（而非让插件在命令行参数里重复声明），使 cordis.toml
+     * 成为唯一来源；追加在继承环境之上，不消费这些变量的插件不受影响。
+     */
+    private static func pluginEnv(entry: PluginEntry): HashMap<String, String> {
+        let env = HashMap<String, String>()
+        env.add("CORDIS_PLUGIN_ID", entry.id)
+        env.add("CORDIS_PLUGIN_PROVIDE", String.join(entry.provide.toArray(), delimiter: ","))
+        env.add("CORDIS_PLUGIN_INJECT", String.join(entry.inject.toArray(), delimiter: ","))
+        env
+    }
+
     private func launchStdio(entry: PluginEntry): PluginInstance {
         let proc = launch(entry.source, entry.args.toArray(),
+            environment: Some(pluginEnv(entry)),
             stdIn: ProcessRedirect.Pipe,
             stdOut: ProcessRedirect.Pipe,
             stdErr: ProcessRedirect.Pipe)
@@ -153,6 +170,7 @@ public class PluginManager {
         args.add("--uds")
         args.add(path)
         let proc = launch(entry.source, args.toArray(),
+            environment: Some(pluginEnv(entry)),
             stdIn: ProcessRedirect.Pipe,
             stdOut: ProcessRedirect.Pipe,
             stdErr: ProcessRedirect.Pipe)

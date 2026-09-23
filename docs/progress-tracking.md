@@ -326,7 +326,67 @@
 - `testStatusListenersReceiveTransitions`（onStatusChange 收到 Starting→Active）
 - 踩坑：InstanceStatus 的 ToString 输出带限定名 `InstanceStatus.Active`（断言 contains 用全名）；`while(true)` 表达式是 Unit，需尾部兜底 return。
 
+### P15 — xisp 脚本插件运行时（分支 `feat/xisp-plugin`）
+
+新增成员 `cordis_xisp`：插件可以是 **xisp（Lisp）脚本**，无需编译。
+
+1. **运行时**（`cordis_xisp/src/runtime.cj`）：复用 `PluginRuntime.run`，在业务
+   handler 里构造干净 `Environment` + `BuiltinFunctions.registerPure`，把
+   `PluginContext` 能力注册为 `cordis::*` 绑定，再加载 `.lisp` 脚本；
+   脚本顶层求值 = 插件初始化。
+2. **脚本调用机制**：xisp 无公开「调用函数值」API，改用表达式树
+   `(apply <proc> (quote <args>))` 交给 `Evaluator.eval`（`apply` 是特殊形式、
+   Procedure/NativeFunc 值自求值、`quote` 保证实参不被求值）。
+3. **并发模型**：`Environment` 非线程安全 → 所有进脚本回调经可重入 `scriptLock`
+   串行化；每次调用新建 `Evaluator`（不复用实例状态）。
+4. **解死锁（关键）**：`cordis::invoke`/`serial`/`bail`/`waterfall` 在等待宿主响应
+   前 **`unlock()` 释放脚本锁**，响应后重新 `lock()`。否则「脚本 handler 内调用
+   本插件自己的服务」会死锁：宿主把 INVOKE 派发回本插件时，处理线程阻塞在同
+   一把锁上，而发起线程在等该响应。异常路径同样恢复锁。
+5. **元数据通道（cordis.toml 单一来源）**：`PluginManager` 拉起插件时按 `entry`
+   注入 `CORDIS_PLUGIN_ID` / `CORDIS_PLUGIN_PROVIDE` / `CORDIS_PLUGIN_INJECT`
+   环境变量（实测 `launch` 的 `environment` 是**追加**在继承环境之上），插件据此
+   发 initialize 并注册服务——避免「cordis.toml entry 与命令行参数两处声明」不一致。
+6. **诊断**：声明的 provide 若在脚本初始化后无对应 handler，写 stderr 留痕
+   （宿主按 `entry.provide` 等待注册，静默缺失表现为「插件起不来」而不是 invoke 报错）；
+   `println` 经 `registerPure(output:)` 接宿主日志（stdout 是协议帧通道）。
+7. **绑定面**：`register-handler` / `invoke` / `provide` / `dispose` / `plugin-id`、
+   `on` / `once` / `emit` / `serial` / `bail` / `waterfall`、
+   `log` / `effect` / `config`、`timeout` / `interval` / `throttle` / `debounce`
+   （定时器返回可调用的 `cancel` 函数）。
+8. **踩坑记录**：
+   - `ctx.invoke(service, method, Array<JsonValue>)` 在 lambda 上下文内直接调用会
+     触发 cjc 1.1.3 **编译器语义错误**（`semantic error ... report to Cangjie team`），
+     包一层非泛型私有方法后正常——所有经 lambda 调用的带泛型重载 ctx 方法都走包装
+     （`invokeRemote` / `serialRemote` / `bailRemote` / `waterfallRemote`）；
+   - 泛型方法 `withRelinquishedLock<T>` + lambda 同样触发该语义错误，改为
+     `JsonValue` / `?JsonValue` 两个具体返回类型版本；
+   - `match (a, b)` 元组模式仓颉不支持（报 `unclosed delimiter`），改嵌套 match；
+   - `EventMode.SERIAL` 是 String 常量，不能用作 match 模式（`enum pattern is not
+     matched`），改 `if (mode == ...)`；
+   - `val` 不是仓颉关键字（用 `let`）；`Option` 无 `getOrElse`；`Path` 无 `baseName`；
+     仓颉默认参数写作 `config!: T = ...`；
+   - `PluginManager()` 无参构造是 **no-op logger**，插件 stderr 转发会被丢弃；
+     要用 `PluginManager(logger)` 才能看到插件侧诊断。
+9. **依赖待收口**：`ystyle::xisp` 用 path 依赖（`../../xisp`）——`registerPure` /
+   求值中断检查点 / 严格解析在 xisp v0.4.0 之后才进 master，尚未发版；
+   xisp 发版后改版本号才能发中心仓。
+
+**测试**（新增 20 用例，全量 142 通过，零回归）：
+- `xisp_bridge_test.cj`（8）：标量往返 / 整数还原 / Cons 列表 / 嵌套对象 /
+  5 万元素长数组不爆栈 / 不可序列化值（NativeFunc、Error）/ 符号按文本 /
+  点对拒绝 / `stringField`；
+- `xisp_runtime_test.cj`（8，`MemoryDuplexTransport` 内存双端）：echo/add invoke /
+  错误值 → `INVOKE-ERROR` / provide 返回 undo_id / 配置下发 / interval 定时器 /
+  `cancel` 撤销 / 语法错误初始化失败 / `cordis::plugin-id`；
+- `xisp_e2e_test.cj`（4，真实宿主 + 真实 `ystyle::cordis_xisp.cli` 进程 + `.lisp`）：
+  invoke（含 whoami 验证环境变量通道）/ 双 lisp 插件事件路由 / **嵌套 invoke 无死锁**
+  （限时轮询保护）/ 缺失脚本失败路径与 stderr 转发。
+- 设计文档：[docs/design-xisp-plugin.md](design-xisp-plugin.md)；使用文档：
+  [cordis_xisp/README.md](../cordis_xisp/README.md)。
+
 ## 待办 / 下一步
 
 - [ ] 发布流程（cangjie-publish）：注意宏库带 organization 跨模块消费缺陷——若对外发布宏，评估去 org 或实测中心仓拉取路径
 - [ ] cordis-cj 发版 0.2.0（P8 UDS + P9 语义核心 + P10 服务系统 + P11 增强 + P12/P13/P14）（中心仓 gjson 1.2.1 同步问题待恢复后继续）
+- [ ] `cordis_xisp` 发版前置：xisp 先发含 `registerPure` / 中断检查点 / 严格解析的版本，再把 `cordis_xisp`、`cordis_tests` 的 path 依赖改回版本号

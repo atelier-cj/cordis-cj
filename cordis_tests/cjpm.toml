@@ -19,8 +19,11 @@
   "ystyle::cordis_core" = "0.1.0"
   "ystyle::cordis_host" = "0.1.0"
   "ystyle::cordis_plugin" = "0.1.0"
+  "ystyle::cordis_xisp" = "0.1.0"
   "ystyle::jsonrpc" = "0.7.4"
   "ystyle::jsonrpc_unix" = "0.7.4"
+  # xisp 的纯函数子集/中断检查点尚未发版，与 cordis_xisp 同源用 path 依赖
+  "ystyle::xisp" = { path = "../../xisp" }
   "jsonvalue" = "1.1.0"
 
 [target.x86_64-unknown-linux-gnu.bin-dependencies]

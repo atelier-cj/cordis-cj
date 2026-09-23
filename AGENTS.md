@@ -15,10 +15,11 @@
 
 ## 发布约定（中心仓）
 
-- 只发布**库包**：`cordis_core`（核心）→ `cordis_host`（宿主侧）→ `cordis_plugin`（插件侧），按依赖顺序发版
+- 只发布**库包**：`cordis_core`（核心）→ `cordis_host`（宿主侧）→ `cordis_plugin`（插件侧）→ `cordis_xisp`（xisp 脚本插件运行时），按依赖顺序发版
 - **测试包与示例包不需要发布到中心仓**：`cordis_tests`（测试）、`cordis_examples`（示例）仅用于本地构建与集成验证（`cjpm test`），不进发版清单、不做 bundle/publish
 - 发版顺序：`cordis_core` 先发（含 registry 索引同步），`cordis_host`/`cordis_plugin` 依赖它随后发
 - workspace 成员间依赖**直接写版本号**（如 `"ystyle::cordis_core" = "0.1.0"`），未发布也能在 workspace 内解析到本地成员，无需 path 依赖，也无需发版前转换
+- ⚠️ **`cordis_xisp` 有跨仓 path 依赖待收口**：`"ystyle::xisp" = { path = "../../xisp" }`——运行所需的 `registerPure` / 求值中断检查点 / 严格解析在 xisp v0.4.0 之后才进 master，尚未发版。**xisp 发版后**须改回版本号，`cordis_xisp` 才能发中心仓；`cordis_tests` 里同源的 path 依赖一并收口
 
 ## 项目结构
 
@@ -28,6 +29,7 @@ cordis-cj/
 ├── cordis_core/       # 核心库：插件模型、事件总线、配置、RPC 客户端封装
 ├── cordis_host/       # 宿主侧库：PluginManager、插件生命周期、进程管理
 ├── cordis_plugin/     # 插件侧库：PluginRuntime、宿主通信
+├── cordis_xisp/       # xisp 脚本插件运行时（cordis::* Lisp 绑定 + 可执行入口）
 ├── cordis_examples/   # 示例（e2e 演示插件/宿主，不发中心仓）
 ├── cordis_tests/      # 集成测试（不发中心仓）
 └── docs/              # 设计文档
@@ -46,7 +48,10 @@ cjpm build -j 16
 cjpm test -j 16 --no-progress
 
 # 运行指定测试
-cjpm test --show-all-output --filter 'TestName.*'
+#   --filter 是【通配符】不是正则：*. * 只对「类名.方法名」的 class 风格用例有效；
+#   顶层函数风格用例名里没有点，要用子串写法（如 '*Xisp*'）。
+cjpm test --show-all-output --filter 'ClassName.*'   # class 风格
+cjpm test --show-all-output --filter '*keyword*'     # 子串（各种风格通用）
 
 # 清理构建缓存
 cjpm clean
