@@ -19,7 +19,8 @@
 - **测试包与示例包不需要发布到中心仓**：`cordis_tests`（测试）、`cordis_examples`（示例）仅用于本地构建与集成验证（`cjpm test`），不进发版清单、不做 bundle/publish
 - 发版顺序：`cordis_core` 先发（含 registry 索引同步），`cordis_host`/`cordis_plugin` 依赖它随后发
 - workspace 成员间依赖**直接写版本号**（如 `"ystyle::cordis_core" = "0.1.0"`），未发布也能在 workspace 内解析到本地成员，无需 path 依赖，也无需发版前转换
-- ⚠️ **`cordis_xisp` 有跨仓 path 依赖待收口**：`"ystyle::xisp" = { path = "../../xisp" }`——运行所需的 `registerPure` / 求值中断检查点 / 严格解析在 xisp v0.4.0 之后才进 master，尚未发版。**xisp 发版后**须改回版本号，`cordis_xisp` 才能发中心仓；`cordis_tests` 里同源的 path 依赖一并收口
+- **当前版本**：`cordis_core 0.1.0`（0.2.0 批次相对已发布 0.1.0 无 src 变更，按准入判据未发）· `cordis_host 0.2.0` · `cordis_plugin 0.2.0` · `cordis_xisp 0.1.0`；`cordis_xisp` 依赖已发布中心的 `ystyle::xisp 0.4.1`
+- ⚠️ **运行时契约**：xisp 插件依赖宿主侧 `cordis_host >= 0.2.0` 按 `entry` 下发 `CORDIS_PLUGIN_ID` / `CORDIS_PLUGIN_PROVIDE` / `CORDIS_PLUGIN_INJECT` 环境变量；旧宿主不下发，插件拿不到 id/provide，服务注册不会完成
 
 ## 项目结构
 

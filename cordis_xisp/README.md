@@ -158,7 +158,12 @@ cjpm test --show-all-output --filter '*Xisp*'
 
 ## 依赖说明
 
-`ystyle::xisp` 目前以 **path 依赖**（`../../xisp`）引入：运行所需的
-`registerPure` 纯函数子集、求值中断检查点、严格解析在 xisp v0.4.0 之后才进
-master，尚未发版。**xisp 发版后**这里应改为版本号依赖，之后 `cordis_xisp`
-才能随之发中心仓。
+- `ystyle::xisp` **0.4.1**（中心仓）：提供 `registerPure` 纯函数子集、求值中断
+  检查点与严格解析；
+- `ystyle::cordis_plugin` **0.2.0**、`ystyle::cordis_core` **0.1.0**。
+
+**宿主侧契约**：本运行时依赖宿主按 `entry` 下发 `CORDIS_PLUGIN_ID` /
+`CORDIS_PLUGIN_PROVIDE` / `CORDIS_PLUGIN_INJECT` 三个环境变量，即宿主侧需要
+**`cordis_host` ≥ 0.2.0**。旧宿主不下发这些变量，插件拿不到 id / provide
+清单，服务注册不会完成（表现为插件起不来）。独立运行调试时可用同名命令行
+参数覆盖（见上文「provide / inject 的声明」）。

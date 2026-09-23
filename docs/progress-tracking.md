@@ -385,8 +385,29 @@
 - 设计文档：[docs/design-xisp-plugin.md](design-xisp-plugin.md)；使用文档：
   [cordis_xisp/README.md](../cordis_xisp/README.md)。
 
+### P16 — 发版 0.2.0 批次（2026-09-23）
+
+按「发版准入判据」逐包与中心仓已发布制品做 src 逐文件比对后定版：
+
+| 包 | 版本 | 依据 |
+|---|---|---|
+| `cordis_host` | 0.1.0 → **0.2.0** | 3 个 src 文件变更（静默失败诊断 + entry 元数据环境变量注入） |
+| `cordis_plugin` | 0.1.0 → **0.2.0** | 1 个 src 文件变更（监听器/退订/派发异常留痕） |
+| `cordis_xisp` | — → **0.1.0** | 新包首发（显式决策，已更新 `docs/publish-scope.md`） |
+| `cordis_core` | 保持 **0.1.0** | **相对已发布 0.1.0 零 src 差异、依赖未变 → 按准入判据不发** |
+
+1. `cordis_xisp` 的 `ystyle::xisp` 由 path 依赖改为 **`0.4.1`**（xisp 本轮发版，
+   提供 `registerPure` / 中断检查点 / 严格解析）；`cordis_plugin` 依赖改 `0.2.0`；
+   `cordis_tests`/`cordis_examples` 的成员依赖同步收口（测试改走已发布版本号）。
+2. **运行时契约**：xisp 插件需要宿主侧 `cordis_host >= 0.2.0` 下发
+   `CORDIS_PLUGIN_*` 环境变量；旧宿主不下发即无法完成服务注册。
+3. 制品清单：三个待发包 `include` 加 `LICENSE`；`cordis_xisp` 加
+   `exclude = ["/examples"]`（锚定包根，避免误伤 `src/` 下同名目录）。
+   同步修掉 xisp 侧 0.4.0 把 `docs-site` 整站打进制品的旧问题（详见 xisp 仓提交）。
+4. 验证：workspace 全量 **142 用例通过**（此时 xisp 已走注册表版本号，等于顺带
+   验证了发布件可被消费）。
+
 ## 待办 / 下一步
 
 - [ ] 发布流程（cangjie-publish）：注意宏库带 organization 跨模块消费缺陷——若对外发布宏，评估去 org 或实测中心仓拉取路径
-- [ ] cordis-cj 发版 0.2.0（P8 UDS + P9 语义核心 + P10 服务系统 + P11 增强 + P12/P13/P14）（中心仓 gjson 1.2.1 同步问题待恢复后继续）
-- [ ] `cordis_xisp` 发版前置：xisp 先发含 `registerPure` / 中断检查点 / 严格解析的版本，再把 `cordis_xisp`、`cordis_tests` 的 path 依赖改回版本号
+- [ ] 后续批次：`cordis_core` 有实质变更时再随批次发版（0.2.0 批次它零差异未发）

@@ -3,14 +3,14 @@
   name = "cordis_plugin"
   organization = "ystyle"
   description = "Cordis 动态组合框架插件 SDK"
-  version = "0.1.0"
+  version = "0.2.0"
   target-dir = ""
   script-dir = ""
   output-type = "static"
   compile-option = ""
   override-compile-option = ""
   link-option = ""
-  include = ["src"]
+  include = ["src", "LICENSE"]
   license = ["MIT"]
   repository = "https://atomgit.com/ystyle/cordis-cj.git"
   authors = ["ystyle"]

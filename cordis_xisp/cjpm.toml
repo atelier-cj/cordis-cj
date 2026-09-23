@@ -10,7 +10,9 @@
   compile-option = ""
   override-compile-option = ""
   link-option = ""
-  include = ["src"]
+  include = ["src", "LICENSE"]
+  # 锚定包根：`examples` 不加 `/` 会连 src 下同名目录一起排除
+  exclude = ["/examples"]
   license = ["MIT"]
   repository = "https://atomgit.com/ystyle/cordis-cj.git"
   authors = ["ystyle"]
@@ -21,10 +23,9 @@
 
 [dependencies]
   "ystyle::cordis_core" = "0.1.0"
-  "ystyle::cordis_plugin" = "0.1.0"
-  # xisp 的纯函数子集 registerPure / 求值中断检查点 / 严格解析尚未发版（v0.4.0 之后在 master），
-  # 先用 path 依赖；xisp 发版后改为版本号。
-  "ystyle::xisp" = { path = "../../xisp" }
+  "ystyle::cordis_plugin" = "0.2.0"
+  # xisp 的纯函数子集 registerPure / 求值中断检查点 / 严格解析由 v0.4.1 提供
+  "ystyle::xisp" = "0.4.1"
   "jsonvalue" = "1.1.0"
 
 [target.x86_64-unknown-linux-gnu.bin-dependencies]
