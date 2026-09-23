@@ -1,0 +1,13 @@
+version = 0
+
+[requires]
+  "ystyle::cordis_core" = {version = "0.1.0"}
+  gjson = {version = "1.2.1"}
+  jsonvalue = {version = "1.1.0"}
+  "ystyle::cordis_plugin" = {version = "0.2.0"}
+  "ystyle::xisp" = {version = "0.4.1"}
+  tomlcj = {version = "1.0.0"}
+  "ystyle::jsonrpc" = {version = "0.7.4"}
+  "ystyle::jsonrpc_stdio" = {version = "0.7.4"}
+  "ystyle::jsonrpc_unix" = {version = "0.7.4"}
+  cjpminfo = {version = "1.2.0"}
