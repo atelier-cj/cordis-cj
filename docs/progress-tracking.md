@@ -407,7 +407,28 @@
 4. 验证：workspace 全量 **142 用例通过**（此时 xisp 已走注册表版本号，等于顺带
    验证了发布件可被消费）。
 
+### P17 — 发版规则改为 lockstep（workspace = 一个产品，2026-09-23）
+
+本 workspace 改为**产品级版本语义**：已发布成员（`cordis_core` / `cordis_host` /
+`cordis_plugin` / `cordis_xisp`）**共用同一版本号**；任一成员有实质变更即整产品推进
+一个版本，零改动成员随之发版。测试/示例包不参与、不发布。
+
+1. **为什么改**：P16 按「单包准入判据」发版，结果出现 `cordis_core 0.1.0` /
+   `cordis_host·cordis_plugin 0.2.0` / `cordis_xisp 0.1.0` **三档并存**——消费者无法从
+   版本号看出"哪套配哪套"。而本工作区的多包产品一直是 lockstep：`json-rpc` 6 包同为
+   0.7.7、`lsp-cj` 3 包同为 0.2.1。规则不落纸，执行就会随机。
+2. **代价（认下来）**："号变了"不再等于"这个包改了"；包级信息由 changelog / `cjdep` 承担。
+3. **边界**：workspace 内统一，**跨产品仍精确 pin**（`cordis_xisp` → `ystyle::xisp 0.4.1`）；
+   **库一律不用版本区间**——个人开发者生态下发版无法保证严格语义，区间会把版本选择权
+   交给没有你的 lock 的消费者。
+4. **本次不补发**：不为"当下整齐"产出两个零改动 artifact（不可逆）；**下次发版统一对齐到 0.3.0**。
+5. **规则单一来源**：工作区 `docs/publish-scope.md` §5.6（判据 4）；工具
+   `./scripts/workspace-release.sh check|bump|publish|tag cordis-cj`——`bump` 会一并改写
+   成员间依赖声明，`publish` 按拓扑序预演（cjpm 不支持 workspace 级发布：`[workspace]`
+   没有 version 字段、`cjpm publish` 无批量语义，且成员目录内依赖从 registry 解析）。
+
 ## 待办 / 下一步
 
 - [ ] 发布流程（cangjie-publish）：注意宏库带 organization 跨模块消费缺陷——若对外发布宏，评估去 org 或实测中心仓拉取路径
-- [ ] 后续批次：`cordis_core` 有实质变更时再随批次发版（0.2.0 批次它零差异未发）
+- [ ] **下次 cordis 发版：`workspace-release.sh bump cordis-cj 0.3.0` 四包对齐**（本批三档并存是历史遗留）
+- [ ] `cordis_core` 有实质变更时随产品版本一起发（lockstep 下不再单独判定"零差异不发"）
