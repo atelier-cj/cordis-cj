@@ -3,7 +3,7 @@
   name = "cordis_core"
   organization = "ystyle"
   description = "Cordis 动态组合框架核心：协议消息类型与配置加载"
-  version = "0.1.0"
+  version = "0.3.0"
   target-dir = ""
   script-dir = ""
   output-type = "static"
@@ -17,7 +17,7 @@
 
 [dependencies]
   "tomlcj" = "1.0.0"
-  "jsonvalue" = "1.1.0"
+  "jsonvalue" = "1.1.1"
 
 [target.x86_64-unknown-linux-gnu.bin-dependencies]
   path-option = ["${CANGJIE_STDX_PATH}"]

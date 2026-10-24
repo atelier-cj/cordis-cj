@@ -20,10 +20,10 @@
   "ystyle::cordis_host" = "0.2.0"
   "ystyle::cordis_plugin" = "0.2.0"
   "ystyle::cordis_xisp" = "0.1.0"
-  "ystyle::jsonrpc" = "0.7.7"
-  "ystyle::jsonrpc_unix" = "0.7.7"
+  "ystyle::jsonrpc" = "0.7.9"
+  "ystyle::jsonrpc_unix" = "0.7.9"
   "ystyle::xisp" = "0.4.1"
-  "jsonvalue" = "1.1.0"
+  "jsonvalue" = "1.1.1"
 
 [target.x86_64-unknown-linux-gnu.bin-dependencies]
   path-option = ["${CANGJIE_STDX_PATH}"]

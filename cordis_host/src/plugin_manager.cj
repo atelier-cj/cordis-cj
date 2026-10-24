@@ -8,6 +8,7 @@ import std.io.StringReader
 import std.sync.Mutex
 import std.fs.{removeIfExists, Path}
 import std.collection.{ArrayList, HashMap}
+import std.env.getVariables
 
 /**
  * 插件进程管理器（docs/design-impl.md §3.3、§3.4）
@@ -138,8 +139,23 @@ public class PluginManager {
      * 由宿主按 entry 下发（而非让插件在命令行参数里重复声明），使 cordis.toml
      * 成为唯一来源；追加在继承环境之上，不消费这些变量的插件不受影响。
      */
+    /**
+     * 插件进程环境：**继承宿主全部环境变量**，再叠加插件专属的 `CORDIS_*`。
+     *
+     * 为什么必须继承：`launch(environment: Some(env))` 是**替换**整个环境，不是追加。
+     * 只给 3 个 `CORDIS_*` 会让子进程丢掉 `HOME` / `PATH` / 代理设置 / 语言等一切
+     * —— 表现是"插件读不到用户配置"（`HOME` 缺失 → 回退到 `.` → 找不到 `~/.atelier.toml`
+     * → 静默退化成内建默认值），而这条链路**全程不报错**。
+     *
+     * 实测：只给 `CORDIS_*` 时，插件侧 `getVariable("HOME")` 返回 None，
+     * 代码里的 `case None => "."` 兜底生效，于是它去读 `./.atelier.toml`——
+     * 文件不存在，`loadUserProviders` 直接 return，用户配置全部失效。
+     */
     private static func pluginEnv(entry: PluginEntry): HashMap<String, String> {
         let env = HashMap<String, String>()
+        // 先铺父环境（子进程要能拿到 HOME/PATH/TLS 证书路径/代理等）
+        for ((k, v) in getVariables()) { env[k] = v }
+        // 再叠加插件专属变量（同名时以插件为准）
         env.add("CORDIS_PLUGIN_ID", entry.id)
         env.add("CORDIS_PLUGIN_PROVIDE", String.join(entry.provide.toArray(), delimiter: ","))
         env.add("CORDIS_PLUGIN_INJECT", String.join(entry.inject.toArray(), delimiter: ","))

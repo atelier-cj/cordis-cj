@@ -3,7 +3,7 @@
   name = "cordis_host"
   organization = "ystyle"
   description = "Cordis 动态组合框架宿主：进程管理与调谐器"
-  version = "0.2.0"
+  version = "0.3.0"
   target-dir = ""
   script-dir = ""
   output-type = "static"
@@ -16,10 +16,10 @@
   authors = ["ystyle"]
 
 [dependencies]
-  "ystyle::cordis_core" = "0.1.0"
-  "ystyle::jsonrpc" = "0.7.7"
-  "ystyle::jsonrpc_unix" = "0.7.7"
-  "jsonvalue" = "1.1.0"
+  "ystyle::cordis_core" = "0.3.0"
+  "ystyle::jsonrpc" = "0.7.9"
+  "ystyle::jsonrpc_unix" = "0.7.9"
+  "jsonvalue" = "1.1.1"
 
 [target.x86_64-unknown-linux-gnu.bin-dependencies]
   path-option = ["${CANGJIE_STDX_PATH}"]

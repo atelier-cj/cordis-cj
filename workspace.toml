@@ -9,9 +9,9 @@
 
 # 共享外部依赖：声明一次，sync 只会对齐成员**已声明**的同键依赖，不新增依赖
 [workspace.dependencies]
-  "jsonvalue" = "1.1.0"
-  "ystyle::jsonrpc" = "0.7.7"
-  "ystyle::jsonrpc_unix" = "0.7.7"
+  "jsonvalue" = "1.1.1"
+  "ystyle::jsonrpc" = "0.7.9"
+  "ystyle::jsonrpc_unix" = "0.7.9"
 
 # 参与发布的成员；members 留空 = 自动（workspace members 里除 *_tests / *_examples 之外的全部）
 [workspace.publish]
