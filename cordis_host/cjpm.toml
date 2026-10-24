@@ -10,7 +10,7 @@
   compile-option = ""
   override-compile-option = ""
   link-option = ""
-  include = ["src", "LICENSE"]
+  include = ["/src", "/LICENSE"]
   license = ["MIT"]
   repository = "https://atomgit.com/ystyle/cordis-cj.git"
   authors = ["ystyle"]

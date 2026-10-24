@@ -10,7 +10,7 @@
   compile-option = ""
   override-compile-option = ""
   link-option = ""
-  include = ["src", "LICENSE"]
+  include = ["/src", "/LICENSE"]
   # 锚定包根：`examples` 不加 `/` 会连 src 下同名目录一起排除
   exclude = ["/examples"]
   license = ["MIT"]
