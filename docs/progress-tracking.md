@@ -432,3 +432,31 @@
 - [ ] 发布流程（cangjie-publish）：注意宏库带 organization 跨模块消费缺陷——若对外发布宏，评估去 org 或实测中心仓拉取路径
 - [ ] **下次 cordis 发版：`workspace-release.sh bump cordis-cj 0.3.0` 四包对齐**（本批三档并存是历史遗留）
 - [ ] `cordis_core` 有实质变更时随产品版本一起发（lockstep 下不再单独判定"零差异不发"）
+
+## 0.3.1 — 2026-11-11（lockstep）
+
+**内容**
+
+- `cordis_core` / `cordis_host` / `cordis_plugin`：新增 **ready 就绪信号**（`Methods.READY` + `ReadyParams`）
+  与 `PluginHost.awaitReady(id)`。插件在业务 handler 执行完后发 ready；
+  宿主据此判断「实现已注册、可以 invoke」——此前 `provide` 早于 handler 注册，宿主拿到 provide 就调用会偶发
+  `INVOKE-ERROR: service 'x' not provided by this plugin`。
+- 修 `cordis_host` 的通知回调被覆盖：log 通知用的 `setNotificationCallback` 是「清空再设」语义，
+  会把先注册的 ready 回调一并清掉（表现为 ready 永远收不到）。改用 `addNotificationCallback`。
+- `cordis_xisp` 随产品版本发版（本版无改动，lockstep）。
+
+**制品**：四个成员顶层均为 `LICENSE` / `README.md` / `cjpm.toml` / `src`；
+`cordis_core` 本次补上成员级 `LICENSE`（此前制品里没有）。
+
+**发布过程记要**（踩坑，避免重复）
+
+1. 预演仓：`./scripts/workspace-release.sh publish cordis-cj` 只允许本地/内网预演仓；
+   预演通过后再切官方仓逐个 `cjpm publish`。
+2. **发布后本地索引缓存会陈旧**：即使 `cjpm update` 报 success，下游成员仍会报
+   `package was broken while downloading <dep>-<ver> ... try 'cjpm update'`。
+   解法：删掉 `~/.cjpm/repository/index/<org>/<前2>/<次2>/<包名>` 这个文件的**具体包**
+   再 `cjpm update`。
+3. `cordis_xisp` 的 `cjpm bundle` 需要先 `cjpm build -i`（否则报
+   `please execute 'cjpm build -i' successfully first`）。
+4. 官方索引同步实测约 1 分钟；按 skill 的有限次重试（60/180/300s）确认「索引命中 + 制品 200」。
+
