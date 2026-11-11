@@ -1,11 +1,11 @@
 version = 0
 
 [requires]
-  cjpminfo = {version = "1.2.0"}
+  tomlcj = {version = "1.0.0"}
   "ystyle::jsonrpc_stdio" = {version = "0.7.9"}
   "ystyle::xisp" = {version = "0.4.1"}
-  tomlcj = {version = "1.0.0"}
-  gjson = {version = "1.2.2"}
-  "ystyle::jsonrpc" = {version = "0.7.9"}
-  "ystyle::jsonrpc_unix" = {version = "0.7.9"}
   jsonvalue = {version = "1.1.1"}
+  cjpminfo = {version = "1.2.0"}
+  "ystyle::jsonrpc_unix" = {version = "0.7.9"}
+  "ystyle::jsonrpc" = {version = "0.7.9"}
+  gjson = {version = "1.2.2"}
