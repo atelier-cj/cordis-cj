@@ -3,7 +3,7 @@
   name = "cordis_xisp"
   organization = "ystyle"
   description = "Cordis xisp 插件运行时：用 xisp（Lisp）脚本编写 Cordis 插件"
-  version = "0.3.0"
+  version = "0.3.1"
   target-dir = ""
   script-dir = ""
   output-type = "static"
@@ -22,8 +22,8 @@
   compile-option = "--static"
 
 [dependencies]
-  "ystyle::cordis_core" = "0.3.0"
-  "ystyle::cordis_plugin" = "0.3.0"
+  "ystyle::cordis_core" = "0.3.1"
+  "ystyle::cordis_plugin" = "0.3.1"
   # xisp 的纯函数子集 registerPure / 求值中断检查点 / 严格解析由 v0.4.1 提供
   "ystyle::xisp" = "0.4.1"
   "jsonvalue" = "1.1.1"

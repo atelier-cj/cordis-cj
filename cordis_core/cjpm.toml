@@ -3,7 +3,7 @@
   name = "cordis_core"
   organization = "ystyle"
   description = "Cordis 动态组合框架核心：协议消息类型与配置加载"
-  version = "0.3.0"
+  version = "0.3.1"
   target-dir = ""
   script-dir = ""
   output-type = "static"

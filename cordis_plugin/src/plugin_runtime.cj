@@ -689,9 +689,15 @@ public class PluginRuntime {
             this.provideService(key, { => () })
         }
 
-        // 插件业务逻辑
+        // 插件业务逻辑（在这里注册服务实现）
         let ctx = PluginContext(this)
         handler(ctx)
+
+        // 实现注册完了再告诉宿主「就绪」。
+        // 为什么需要这个通知：provide 在前、handler 在后，宿主拿到 provide 时实现可能还没注册，
+        // 此刻的 invoke 会被回成 "service 'x' not provided by this plugin"。
+        // 宿主应 awaitReady() 之后再开始调用。
+        this.server.notify<ReadyParams>(Methods.READY, params: ReadyParams(this.pluginId))
 
         // 阻塞等待连接关闭（宿主 terminate → stdin EOF → receiveLoop 关闭 server）
         while (!this.server.isClosed()) {

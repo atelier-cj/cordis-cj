@@ -29,6 +29,9 @@ public class PluginInstance {
     public let terminateLock: Mutex = Mutex()
     // 启动失败/崩溃原因（对齐 Cordis Fiber._error，await() 重抛）
     public var error: ?String = None
+    // 插件是否已上报 ready（业务 handler 执行完、实现注册完毕）。
+    // 读写都在 settleLock 下进行：状态机与就绪标志共用一把锁，awaitReady 复用 settleCond。
+    public var ready: Bool = false
 
     public init(entry: PluginEntry, process: SubProcess, client: JsonRpcClient) {
         this.entry = entry

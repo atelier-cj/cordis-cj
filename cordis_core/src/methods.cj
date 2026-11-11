@@ -10,6 +10,10 @@ public class Methods {
     public static let DISPOSE: String = "dispose"            // 宿主 → 插件（请求）
     public static let NOTIFY: String = "notify"              // 宿主 → 插件（通知，依赖图变化）
     public static let LOG: String = "log"                    // 插件 → 宿主（通知）
+    // 插件 → 宿主：业务 handler 已执行完、实现注册完毕（通知）。
+    // 与 provide 的区别：provide 表示「我要提供这个服务」，ready 表示「实现已经就位」——
+    // 两者之间有个窗口，宿主在这个窗口里 invoke 会得到「service not provided」。
+    public static let READY: String = "ready"
     public static let INVOKE: String = "invoke"              // 宿主转发服务调用
     public static let PING: String = "ping"                  // 宿主 → 插件（请求，探活）
     public static let PONG: String = "pong"                  // 插件 → 宿主（响应 ping）

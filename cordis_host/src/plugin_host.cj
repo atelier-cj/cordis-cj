@@ -154,8 +154,21 @@ public class PluginHost {
             }
         })
 
-        // 插件 → 宿主：log 通知（JsonRpcClient 支持多回调，独立注册）
-        client.setNotificationCallback({ notif =>
+        // 插件 → 宿主：ready 通知（业务 handler 跑完、实现注册完毕）。
+        // 必须用 addNotificationCallback：setNotificationCallback 是单槽（会被后面的 log 注册覆盖）。
+        client.addNotificationCallback({ notif =>
+            if (notif.method == Methods.READY) {
+                synchronized(instance.settleLock) {
+                    instance.ready = true
+                    instance.settleCond.notifyAll()
+                }
+                this.logger(providerId, "ready")
+            }
+        })
+
+        // 插件 → 宿主：log 通知
+        // 必须 add 而不是 set：setNotificationCallback 是「清空再设」，会把上面 READY 的回调一起清掉
+        client.addNotificationCallback({ notif =>
             if (notif.method == Methods.LOG) {
                 match (notif.params) {
                     case Some(p) =>
@@ -368,6 +381,44 @@ public class PluginHost {
      * @param timeout 最长等待时间
      * @return Ok(实例) 已 Active 且服务就绪；Err 失败原因/超时/实例不存在
      */
+    /**
+     * 等插件真正可用：Active（握手+provide 齐）**且**收到 ready 通知（业务 handler 已注册实现）。
+     *
+     * 为什么 awaitActive 不够：provide 在插件 handler 之前发出，宿主拿到 provide 时
+     * 插件的 registerHandler 可能还没执行，此时 invoke 会得到「service 未提供」的错误。
+     *
+     * @param id 插件 id
+     * @param timeout 最长等待时间
+     */
+    public func awaitReady(id: String, timeout!: Duration = 10 * Duration.second): Result<PluginInstance> {
+        match (this.awaitActive(id, timeout: timeout)) {
+            case Err(e) => return Err(e)
+            case Ok(inst) => ()
+        }
+        let deadline = MonoTime.now() + timeout
+        let instance = match (this.state.getInstance(id)) {
+            case Some(i) => i
+            case None => return Err("plugin '" + id + "' not found")
+        }
+        while (true) {
+            let isReady = synchronized(instance.settleLock) {
+                instance.ready
+            }
+            if (isReady) {
+                return Ok(instance)
+            }
+            if (this.manager.isExited(instance)) {
+                return Err("plugin '" + id + "' exited before ready")
+            }
+            if (MonoTime.now() >= deadline) {
+                return Err("plugin '" + id + "' not ready within timeout")
+            }
+            sleep(10 * Duration.millisecond)
+        }
+        // 循环内每条路径都 return，这行只为满足类型检查
+        return Err("plugin '" + id + "' not ready")
+    }
+
     public func awaitActive(id: String, timeout!: Duration = 10 * Duration.second): Result<PluginInstance> {
         let deadline = MonoTime.now() + timeout
         while (true) {

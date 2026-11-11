@@ -71,6 +71,25 @@ struct PluginInstance {
 | 宿主 -> 插件 | `dispose` | 携带 `undo_id`，请求插件撤销特定服务 |
 | 宿主 -> 插件 | `notify` | 广播依赖图变化（如提供者退出） |
 | 插件 -> 宿主 | `log` | 转发内部日志 |
+| 插件 -> 宿主 | `ready` | 实现注册完毕（业务 handler 已执行完）；宿主 `awaitReady` 等到它再开始 invoke |
+
+### 就绪信号（`ready`）——为什么不能只看 `provide`
+
+插件启动顺序是「握手 → 为每个 provide 发 provide → 执行业务 handler（`ctx.registerHandler`）」。
+宿主在收到 provide 时就会把实例标成 Active，**此时实现可能还没注册**，这一刻的 `invoke` 会得到
+
+```text
+INVOKE-ERROR: service 'x' not provided by this plugin
+```
+
+（实测偶发，表现为调用方随机失败。）因此：
+
+- 插件在 handler 之后发一条 `ready` 通知；
+- 宿主用 `PluginHost.awaitReady(id)`（= `awaitActive` + 等 `ready`）作为「可以开始调用」的判据；
+- `PluginInstance.ready` 与状态机共用 `settleLock`，`awaitReady` 复用 `settleCond` 唤醒。
+
+⚠️ 注册通知回调必须用 `addNotificationCallback`：`setNotificationCallback` 是「清空再设」语义，
+后注册的回调会把先注册的（本例里是 `ready`）一起清掉——踩过一次，表现为 ready 永远收不到。
 
 ---
 

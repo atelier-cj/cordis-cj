@@ -232,6 +232,34 @@ public class NotifyParams <: JsonSerializable & JsonDeserializable<NotifyParams>
  * log.params（插件 → 宿主，通知）
  * @param logger 命名日志器名称（ctx.logger(name) 时携带，None = 默认 ctx.log）
  */
+// 插件就绪通知的载荷（Methods.READY）
+public class ReadyParams <: JsonSerializable & JsonDeserializable<ReadyParams> {
+    public let pluginId: String
+
+    public init(pluginId: String) {
+        this.pluginId = pluginId
+    }
+
+    public func toJson(w: JsonWriter): Unit {
+        w.startObject()
+        w.writeName("pluginId").writeValue(this.pluginId)
+        w.endObject()
+    }
+
+    public static func fromJson(r: JsonReader): ReadyParams {
+        r.startObject()
+        var pluginId = ""
+        while (r.peek() != EndObject) {
+            match (r.readName()) {
+                case "pluginId" => pluginId = r.readValue<String>()
+                case _ => r.skip()
+            }
+        }
+        r.endObject()
+        ReadyParams(pluginId)
+    }
+}
+
 public class LogParams <: JsonSerializable & JsonDeserializable<LogParams> {
     public let level: String   // LogLevel.TRACE|DEBUG|INFO|WARN|ERROR
     public let message: String
