@@ -1,5 +1,7 @@
 # cordis-cj
 
+仓库：[atomgit.com/ystyle/cordis-cj](https://atomgit.com/ystyle/cordis-cj)
+
 仓颉（Cangjie）Cordis 动态组合框架 —— 「微内核 + 进程隔离」插件系统。
 
 基于北京大学 & DeepSeek-AI《Revertible Effects and Reactive Coeffects》论文思想，对标 [Cordis](https://github.com/shigma/cordis)（DeepSeek Harness 的插件框架）的语义，用仓颉语言实现：
