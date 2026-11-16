@@ -3,7 +3,7 @@
   name = "cordis_host"
   organization = "ystyle"
   description = "Cordis 动态组合框架宿主：进程管理与调谐器"
-  version = "0.3.1"
+  version = "0.3.2"
   target-dir = ""
   script-dir = ""
   output-type = "static"
@@ -16,7 +16,7 @@
   authors = ["ystyle"]
 
 [dependencies]
-  "ystyle::cordis_core" = "0.3.1"
+  "ystyle::cordis_core" = "0.3.2"
   "ystyle::jsonrpc" = "0.7.9"
   "ystyle::jsonrpc_unix" = "0.7.9"
   "jsonvalue" = "1.1.1"
