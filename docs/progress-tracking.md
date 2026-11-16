@@ -471,3 +471,21 @@
 - 新增 `cordis_tests/src/emit_trace_test.cj`：开关的开/关/再关三态，覆盖通知与请求两条派发路径。
 - 文档：`docs/design-events.md` 新增 §8「事件通道作为数据面」。
 
+
+**2026-11-16 · 0.3.2 发布（中心仓）**
+
+| 成员 | 制品 | 索引 / 制品 |
+|---|---|---|
+| `cordis_core` | 9327 B | ✅ / 200 |
+| `cordis_host` | 20092 B | ✅ / 200 |
+| `cordis_plugin` | 20836 B | ✅ / 200 |
+| `cordis_xisp` | 14505 B | ✅ / 200 |
+
+- 制品顶层均为 LICENSE/README.md/cjpm.toml/src（官方仓解包核对过，`setEmitTrace` 在 `cordis_host` 制品里可见）。
+- 顺序：私有仓预演（同号）→ 官方仓按 topology 逐个发；官方索引同步实测每个成员 60–180s 可见。
+- **两条发布工具坑（本轮又踩）**：
+  1. `workspace-release.sh publish` 在 `cordis_xisp` 上会失败（`please execute 'cjpm build -i' successfully first`）——
+     前面的成员 bundle 会重建共享 target，把 xisp 需要的 `build -i` 产物冲掉。绕过方式：`cd cordis_xisp && cjpm build -i` 后手动
+     `cjpm bundle --skip-lint && cjpm publish`（或用 `publish-member.sh cordis_xisp`）。
+  2. 标签：`workspace-release.sh tag cordis-cj 0.3.2` 生成 `v0.3.2`，记得 `git push origin v0.3.2`。
+

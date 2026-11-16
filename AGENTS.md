@@ -20,7 +20,7 @@
 - 发版顺序：`cordis_core` 先发（含 registry 索引同步），`cordis_host`/`cordis_plugin` 依赖它随后发
 - workspace 成员间依赖**直接写版本号**（如 `"ystyle::cordis_core" = "0.3.0"`），未发布也能在 workspace 内解析到本地成员，无需 path 依赖，也无需发版前转换
 - **本 workspace 视为一个产品：已发布成员**（`cordis_core` / `cordis_host` / `cordis_plugin` / `cordis_xisp`）**共用同一版本号**（lockstep）。任一成员有实质变更即整产品推进一个版本，零改动成员随之发版；测试/示例包（`cordis_tests` / `cordis_examples`）不参与、不发布。规则与理由见工作区 [`docs/publish-scope.md`](../docs/publish-scope.md) §5.6
-- **当前版本**：四个已发布成员统一 **0.3.1**（2026-11-11 发布，已按 lockstep 对齐；此前 0.1.0/0.2.0/0.3.0 三档并存的历史遗留已收口）
+- **当前版本**：四个已发布成员统一 **0.3.2**（2026-11-16 发布，已按 lockstep 对齐；0.3.2 的实质变更：`PluginHost.setEmitTrace` 让 `events/emit` 的逐条日志可配置、默认关闭）
 - 发布工具：`./scripts/workspace-release.sh check|bump|publish|tag cordis-cj`（`bump` 会一并改写成员间依赖声明；`check` 版本不齐时退出码 1）
 - `cordis_xisp` 依赖 `ystyle::xisp 0.4.1`：**跨产品依赖仍写精确版本号**，不随本 workspace 统一
 - ⚠️ **运行时契约**：xisp 插件依赖宿主侧 `cordis_host >= 0.2.0` 按 `entry` 下发 `CORDIS_PLUGIN_ID` / `CORDIS_PLUGIN_PROVIDE` / `CORDIS_PLUGIN_INJECT` 环境变量；旧宿主不下发，插件拿不到 id/provide，服务注册不会完成
