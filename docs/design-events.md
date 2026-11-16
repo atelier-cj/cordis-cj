@@ -252,7 +252,40 @@ let next: () -> ?JsonValue = { =>
 - `testWaterfallAllNextReturnsBuiltin`：全部调 next（无人 veto）→ 内置行为 None
 - `testOnWaterfallNextRoundTrip`：插件侧 onWaterfall → listener 调 next() → 宿主 events/next 响应 → 结果回宿主
 
-## 8. 错误处理与边界
+## 8. 事件通道作为数据面（v0.3.2 起）
+
+事件通道的典型用法有两类：**控制型事件**（低频，关心谁在听）与**数据面流**（高频，
+例如把 harness 的文本增量、工具调用分片一帧帧送上去）。后者的形态决定了三件事：
+
+1. **顺序即语义**：同一连接上的 emit 顺序 = 宿主派发顺序。换行帧 + transport 写锁
+   （`LineStdioTransport.send` 互斥）保证并发 emit 的帧不会交错；
+2. **只此一个写者**：这条连接上只有插件的 JSON-RPC 写路径会写。进程内其它线程、
+   harness 子进程的日志一律走 stderr，不会插进帧里；
+3. **背压方向正确**：宿主在接收线程上同步派发；管道写满时插件的 emit 阻塞它的回合线程，
+   而不是丢帧。
+
+因此「把 stderr 当帧通道」是错的选择：那根管子上还有别人（子进程继承的 stderr、
+库自己的告警），行边界由最不守规矩的写者决定，一帧粘住就静默丢一条。
+相关迁移与实测见工作区文档 `docs/plans/2026-11-16-harness-event-channel.md`。
+
+### 8.1 事件追踪开关（默认关）
+
+逐条打印 `emit <event> -> N subscribers` 在数据面场景会把日志量抬到与事件量同阶。
+所以默认**不打印**，需要排查订阅关系时显式打开：
+
+```cangjie
+let host = PluginHost(PluginManager(), logger)
+host.setEmitTrace(true)    // 打开：每次 emit 打一行（通知路径与请求路径都算）
+host.setEmitTrace(false)   // 关回默认
+host.isEmitTraceEnabled()  // 查询
+```
+
+错误分支（派发抛异常）不受开关影响，始终打印。
+
+> 实测基线：`EmitBurstTest`（处理线程连续 200 + 300 条、两线程并发各 300 条）全部到齐且保序，
+> 连接保持 Active；`EmitTraceTest` 钉住开关的开/关/再关三种状态。
+
+## 9. 错误处理与边界
 
 - **订阅者进程已退出**：派发时 `client.call` 超时/EOF → 跳过该订阅者并自动 `unsubscribe`（崩溃清理）。
 - **事件无订阅者**：`emit` 静默成功（发布者不感知）。
@@ -260,7 +293,7 @@ let next: () -> ?JsonValue = { =>
 - **卸载清理**：`removePlugin` → `unsubscribeAll`（防幽灵订阅）。
 - **参数序列化失败**：emit 参数为 JsonValue 数组，宿主直接透传，不反序列化（减少出错面）。
 
-## 9. 测试计划
+## 10. 测试计划
 
 | 测试 | 覆盖 |
 | :--- | :--- |
@@ -270,8 +303,10 @@ let next: () -> ?JsonValue = { =>
 | `PluginEventTest` | 插件侧 on/once/onVal/onWaterfall/serial/bail/waterfall/parallel 协议往返（FakeHost），含洋葱 next 往返 |
 | `EndToEndTest.testEventBusEndToEnd` | **真实双插件进程**：插件 A emit → 宿主路由 → 插件 B 收到并响应 |
 | `EndToEndTest.testEventCleanupOnUnload` | 插件卸载后订阅自动清理 |
+| `EmitBurstTest` | **数据面可靠性**：处理线程连续 200/300 条全到且保序、连接仍 Active；两线程并发各 300 条不互相截断 |
+| `EmitTraceTest` | **事件追踪开关**：默认关（通知/请求两条路径都不打印）、打开后有日志、再关掉即停 |
 
-## 10. 实施步骤（P6-Events / P9-Events v2 / P13 洋葱 next）
+## 11. 实施步骤（P6-Events / P9-Events v2 / P13 洋葱 next）
 
 1. **P6.1**：cordis_core 消息类 + 方法常量 + 单测。
 2. **P6.2**：cordis_host EventRegistry + PluginHost 接入 + 单测（MemoryDuplexTransport）。
@@ -283,7 +318,7 @@ let next: () -> ?JsonValue = { =>
 8. **P13**：完整洋葱 next——DispatchParams.nextAllowed + `events/next` 协议 + WaterfallChain 链状态 + `ctx.onWaterfall` + 洋葱用例（§7.1）。
 9. 每步遵循 TDD：先写用例 → 实现 → `cjpm test` 通过 → 提交。
 
-## 11. 不做的事（当前范围外）
+## 12. 不做的事（当前范围外）
 
 - 事件参数类型安全（`Array<JsonValue>` 为底层；已提供 `on<T>`/`emit<T>`/`onVal<T>`/`onWaterfall<T>` 泛型封装）。
 - 跨宿主的分布式事件（单宿主内路由）。
