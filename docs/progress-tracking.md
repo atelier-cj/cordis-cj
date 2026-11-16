@@ -460,3 +460,14 @@
    `please execute 'cjpm build -i' successfully first`）。
 4. 官方索引同步实测约 1 分钟；按 skill 的有限次重试（60/180/300s）确认「索引命中 + 制品 200」。
 
+
+**2026-11-16 · 事件通道作为数据面（0.3.2）**
+
+- `PluginHost.setEmitTrace(enabled)`（默认 `false`）：`events/emit` 的逐条宿主日志改为可配置。
+  默认关的理由是事件通道会被当数据面用（一秒几十条），逐条打印会把日志淹掉；错误分支仍始终打印。
+- 新增 `cordis_plugin/src/examples/burst_emit` + `cordis_tests/src/emit_burst_test.cj`：
+  处理线程连续 200/300 条、两线程并发各 300 条 → 全到、保序、连接仍 Active。
+  **这条用例同时是「数据面可以走事件通道」的证据**，替代了此前「emit 会打断连接」的结论。
+- 新增 `cordis_tests/src/emit_trace_test.cj`：开关的开/关/再关三态，覆盖通知与请求两条派发路径。
+- 文档：`docs/design-events.md` 新增 §8「事件通道作为数据面」。
+

@@ -26,6 +26,10 @@ public class PluginHost {
     private let logger: (String, String) -> Unit
     private var undoCounter: Int64 = 0
     private var emitCounter: Int64 = 0
+    // 事件追踪开关：默认关。开 = 每次 emit 打一行宿主日志（事件名 + 订阅者数/模式）。
+    // 默认关的理由：事件通道可以当数据面用（harness 的文本增量一秒几十条），
+    // 逐条打日志会把有用的日志淹掉；要看订阅关系时显式打开即可。
+    private var emitTrace: Bool = false
     private let lock: Mutex = Mutex()
     // Config schema 注册表：pluginId -> ConfigSchema（docs/cordis-comparison.md §4）
     private let schemas: HashMap<String, ConfigSchema> = HashMap<String, ConfigSchema>()
@@ -42,6 +46,30 @@ public class PluginHost {
     public init(manager: PluginManager) {
         this.manager = manager
         this.logger = { _, _ => () }
+    }
+
+    /**
+     * 事件追踪开关（默认关）
+     *
+     * 打开后每次 `ctx.emit` / `ctx.parallel` 等都会打一行宿主日志，
+     * 用于排查「谁在发、发到几个订阅者、走的哪种派发模式」。
+     * 事件高频时（如把事件通道当数据面）不要开——日志量会与事件量同阶。
+     *
+     * @param enabled true = 逐条打印 emit 日志
+     */
+    public func setEmitTrace(enabled: Bool): Unit {
+        synchronized(this.lock) {
+            this.emitTrace = enabled
+        }
+    }
+
+    /**
+     * 事件追踪是否开启
+     */
+    public func isEmitTraceEnabled(): Bool {
+        synchronized(this.lock) {
+            return this.emitTrace
+        }
     }
 
     /**
@@ -190,7 +218,9 @@ public class PluginHost {
                             let params = JsonValue.toObject<EmitParams>(p)
                             let emitId = this.allocateEmitId()
                             let delivered = this.eventRegistry.dispatchEmit(params, emitId)
-                            this.logger(providerId, "emit ${params.event} -> ${delivered} subscribers")
+                            if (this.isEmitTraceEnabled()) {
+                                this.logger(providerId, "emit ${params.event} -> ${delivered} subscribers")
+                            }
                         } catch (e: Exception) {
                             this.logger(providerId, "emit error: ${e.message}")
                         }
@@ -208,7 +238,9 @@ public class PluginHost {
                         let params = JsonValue.toObject<EmitParams>(p)
                         let emitId = this.allocateEmitId()
                         let result = this.eventRegistry.dispatch(params.event, params.args, params.mode, emitId)
-                        this.logger(providerId, "emit ${params.event} mode=${params.mode}")
+                        if (this.isEmitTraceEnabled()) {
+                            this.logger(providerId, "emit ${params.event} mode=${params.mode}")
+                        }
                         match (result) {
                             case Some(v) => Some(v)
                             case None => Some(JsonValue.Null)
